@@ -12,7 +12,7 @@ const formatArtists = (artists) => {
 const getBestImage = (images) => {
   if (!images || !images.length) return null;
   // Prefer higher quality images
-  const bestImage = [...images].sort((a, b) => 
+  const bestImage = [...images].sort((a, b) =>
     parseInt(b.quality) - parseInt(a.quality)
   )[0];
   return bestImage?.url || null;
@@ -26,10 +26,10 @@ const useSongDetails = (track) => {
   useEffect(() => {
     const fetchSongDetails = async () => {
       if (!track?.id) return;
-      
+
       setLoading(true);
       setError(null);
-      
+
       try {
         // For local tracks, use the available metadata
         if (track.isLocal) {
@@ -49,12 +49,49 @@ const useSongDetails = (track) => {
               { label: 'Location', value: 'Local Storage' },
             ]
           });
+          setLoading(false);
+          return;
+        }
+
+        // For YouTube Music tracks, use existing track data (no API call needed)
+        const isYTMusicTrack = track.isYTMusic ||
+          track.source === 'ytmusic' ||
+          (track.id?.length === 11 && !track.isLocalMusic);
+
+        if (isYTMusicTrack) {
+          // Extract artist info from various fields
+          const artistInfo = track.artist || track.primaryArtists ||
+            (track.artists?.primary ? formatArtists(track.artists.primary) : 'Unknown Artist');
+
+          setSongDetails({
+            basicInfo: [
+              { label: 'Title', value: track.title || track.name || 'Unknown Track' },
+              { label: 'Artist', value: artistInfo },
+              { label: 'Album', value: track.album || 'N/A' },
+              { label: 'Duration', value: formatDuration(track.duration) },
+              { label: 'Source', value: 'YouTube Music', highlight: true },
+              { label: 'Language', value: track.language !== 'unknown' ? track.language?.toUpperCase() : 'N/A' },
+            ],
+            additionalInfo: [
+              { label: 'Video ID', value: track.id || 'N/A' },
+              { label: 'Quality', value: track.currentPlayingQuality || '320kbps' },
+              { label: 'Type', value: track.type || 'Song' },
+              { label: 'Year', value: track.year || 'N/A' },
+            ],
+            mediaInfo: [
+              { label: 'Streaming', value: 'YouTube Music' },
+              { label: 'Song ID', value: track.id || 'N/A' },
+            ],
+            imageUrl: track.artwork || track.image,
+            availableQualities: ['128kbps', '256kbps', '320kbps'],
+          });
+          setLoading(false);
           return;
         }
 
         // For online tracks, fetch from API
         const response = await axios.get(`https://jiosavan-api-with-playlist.vercel.app/api/songs/${track.id}`);
-        
+
         if (response.data && response.data.success) {
           const data = response.data.data?.[0]; // Get first item from array
           if (!data) throw new Error('No song data found');
@@ -66,8 +103,8 @@ const useSongDetails = (track) => {
 
           // Format download qualities
           const availableQualities = data.downloadUrl?.map(item => item.quality) || [];
-          const bestQuality = availableQualities.length > 0 
-            ? availableQualities[availableQualities.length - 1] 
+          const bestQuality = availableQualities.length > 0
+            ? availableQualities[availableQualities.length - 1]
             : 'N/A';
 
           // Format basic info
@@ -109,7 +146,7 @@ const useSongDetails = (track) => {
             rawData: data
           });
         } else {
-// Fallback to basic track info if API call fails
+          // Fallback to basic track info if API call fails
           setSongDetails({
             basicInfo: [
               { label: 'Title', value: track.title || 'Unknown Track' },

@@ -613,19 +613,35 @@ async function PlayNextSong() {
       }
 
       const nextTrackIndex = currentTrack + 1;
-      const nextTrack = queue[nextTrackIndex];
 
-      // Check if next track needs stream (wasn't prefetched)
+      // Re-fetch queue to get the latest state (track may have been replaced by prefetch)
+      const freshQueue = await TrackPlayer.getQueue();
+      const nextTrack = freshQueue[nextTrackIndex];
+
+      if (!nextTrack) {
+        console.log('No next track available');
+        return;
+      }
+
+      // Check if next track needs stream (wasn't prefetched or still has placeholder URL)
       const needsStream = nextTrack._needsStream ||
         nextTrack.url?.startsWith('ytmusic://') ||
         nextTrack.url?.includes('music.youtube.com');
 
       if (needsStream && !nextTrack._prefetched) {
-        console.log('🔄 Track not prefetched, fetching on-demand...');
-
-        // Use SmartPrefetchManager for on-demand fetch (1 retry)
+        // FIRST: Check if SmartPrefetchManager has cached stream
         const smartPrefetchManager = require('./Utils/SmartPrefetchManager').default;
-        const streamData = await smartPrefetchManager.fetchOnDemand(nextTrack.id);
+        const cachedStream = smartPrefetchManager.getPrefetchedStream(nextTrack.id);
+
+        let streamData = cachedStream;
+
+        if (cachedStream) {
+          console.log('✅ Using cached prefetched stream for skip');
+        } else {
+          console.log('🔄 Track not in cache, fetching on-demand...');
+          // Use SmartPrefetchManager for on-demand fetch (with retry)
+          streamData = await smartPrefetchManager.fetchOnDemand(nextTrack.id);
+        }
 
         if (streamData && streamData.url) {
           // Replace track in queue with valid URL
@@ -751,10 +767,20 @@ async function SkipToTrack(trackIndex) {
       targetTrack.url?.includes('music.youtube.com');
 
     if (needsStream && !targetTrack._prefetched) {
-      console.log('🎯 Random track selection - fetching on-demand...');
+      console.log('🎯 Random track selection - checking cache...');
 
-      // Use SmartPrefetchManager for on-demand fetch (1 retry)
-      const streamData = await smartPrefetchManager.fetchOnDemand(targetTrack.id);
+      // FIRST: Check if SmartPrefetchManager has cached stream
+      const cachedStream = smartPrefetchManager.getPrefetchedStream(targetTrack.id);
+
+      let streamData = cachedStream;
+
+      if (cachedStream) {
+        console.log('✅ Using cached prefetched stream for random selection');
+      } else {
+        console.log('🔄 Track not in cache, fetching on-demand...');
+        // Use SmartPrefetchManager for on-demand fetch (with retry)
+        streamData = await smartPrefetchManager.fetchOnDemand(targetTrack.id);
+      }
 
       if (streamData && streamData.url) {
         // Replace track in queue with valid URL

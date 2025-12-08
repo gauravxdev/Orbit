@@ -96,38 +96,18 @@ const ContextState = (props) => {
             if (event.type === Event.PlaybackError) {
                 console.warn('An error occured while playing the current track.');
 
-                // Enhanced error handling for unsupported formats
+                // Log error details for debugging
                 try {
                     const currentTrack = await TrackPlayer.getActiveTrack();
                     if (currentTrack) {
                         console.error(`❌ Playback error for: ${currentTrack.title}`);
-
-                        // Check if it's an unsupported format error
-                        const isUnsupportedFormat = event.code === 'android-parsing-container-unsupported' ||
-                            event.message?.includes('Source error') ||
-                            event.message?.includes('unsupported');
-
-                        if (isUnsupportedFormat) {
-                            console.warn('⚠️ Unsupported audio format detected, attempting to skip...');
-
-                            // Try to skip to next track
-                            try {
-                                const queue = await TrackPlayer.getQueue();
-                                if (queue.length > 1) {
-                                    await TrackPlayer.skipToNext();
-                                    console.log('✅ Skipped to next track due to format error');
-                                } else {
-                                    console.warn('⚠️ No more tracks available, stopping playback');
-                                    await TrackPlayer.stop();
-                                }
-                            } catch (skipError) {
-                                console.error('❌ Failed to skip track:', skipError);
-                            }
-                        }
                     }
                 } catch (error) {
-                    console.error('Error handling playback error:', error);
+                    console.error('Error getting track info during error:', error);
                 }
+
+                // NOTE: Auto-recovery is handled by SmartPrefetchManager._handlePlaybackError()
+                // which fetches stream on-demand and retries playback before skipping
             }
 
             if (event.type === Event.PlaybackActiveTrackChanged) {

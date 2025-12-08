@@ -147,7 +147,7 @@ const InfoSection = ({ title, icon, children }) => {
       style={[styles.sectionSurface, { backgroundColor: theme.colors.surface }]}
       elevation={2}
     >
-      <View style={[styles.sectionHeader, { borderBottomColor: theme.colors.outlineVariant }]}> 
+      <View style={[styles.sectionHeader, { borderBottomColor: theme.colors.outlineVariant }]}>
         {icon && (
           <MaterialIcons
             name={icon}
@@ -217,7 +217,7 @@ const SongInfoModal = ({ visible, onDismiss, track }) => {
   }, [track?.currentPlayingQuality]);
 
   const renderChips = (title, icon, chips) => {
-   if (!chips || chips.length === 0) return null;
+    if (!chips || chips.length === 0) return null;
 
     return (
       <InfoSection title={title} icon={icon}>
@@ -262,8 +262,8 @@ const SongInfoModal = ({ visible, onDismiss, track }) => {
               },
             ]}
           >
-            {songDetails?.imageUrl ? (
-              <Image source={{ uri: songDetails.imageUrl }} style={styles.coverArt} resizeMode="cover" />
+            {(songDetails?.imageUrl || track?.artwork || track?.image) ? (
+              <Image source={{ uri: songDetails?.imageUrl || track?.artwork || track?.image }} style={styles.coverArt} resizeMode="cover" />
             ) : (
               <View
                 style={[

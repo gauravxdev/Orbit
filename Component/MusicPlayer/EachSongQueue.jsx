@@ -4,7 +4,7 @@ import FastImage from "react-native-fast-image";
 import { PlainText } from "../Global/PlainText";
 import { SmallText } from "../Global/SmallText";
 import { memo, useState, useRef, useEffect, useCallback } from "react";
-import { useActiveTrack, usePlaybackState } from "react-native-track-player";
+// Removed useActiveTrack and usePlaybackState - now passed as props to prevent hook leak
 import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityIcons";
 import { Swipeable } from "react-native-gesture-handler";
 import { useThemeContext } from "../../Context/ThemeContext";
@@ -17,9 +17,22 @@ import { GetLikedSongs, SetLikedSongs, DeleteALikedSong } from "../../LocalStora
 // Get screen dimensions for responsive layout
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-export const EachSongQueue = memo(function EachSongQueue({ title, artist, index, artwork, id, drag, isActive, onPress, songData, onRemoveFromQueue, reorderMode = false }) {
-  const playerState = usePlaybackState();
-  const currentPlaying = useActiveTrack();
+export const EachSongQueue = memo(function EachSongQueue({
+  title,
+  artist,
+  index,
+  artwork,
+  id,
+  drag,
+  isActive,
+  onPress,
+  songData,
+  onRemoveFromQueue,
+  reorderMode = false,
+  // Props to avoid hook leak (passed from parent instead of calling hooks in EVERY item)
+  playerState,
+  currentPlaying
+}) {
   const { theme, themeMode } = useThemeContext();
   const { getOpacityColor } = useThemeManager();
   const swipeableRef = useRef(null);

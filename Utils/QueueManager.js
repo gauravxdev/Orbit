@@ -158,63 +158,20 @@ class QueueManager {
 
     /**
      * Prefetch stream URL for the next track in queue
-     * Only fetches if the track needs streaming (YouTube/DAB)
+     * DELEGATES to SmartPrefetchManager which correctly handles track replacement
+     * NOTE: updateMetadataForTrack CANNOT update URLs, must remove/re-add track
      */
     async prefetchNextTrack() {
-        if (this.prefetchInProgress) {
-            console.log('⏳ Prefetch already in progress, skipping...');
-            return;
-        }
-
+        // Delegate to SmartPrefetchManager - it handles this correctly
+        // by removing and re-adding tracks (updateMetadataForTrack doesn't work for URLs)
         try {
-            this.prefetchInProgress = true;
-
-            const currentIndex = await TrackPlayer.getCurrentTrack();
-            const queue = await TrackPlayer.getQueue();
-
-            if (currentIndex === null || currentIndex >= queue.length - 1) {
-                console.log('📭 No next track to prefetch');
-                return;
-            }
-
-            const nextTrack = queue[currentIndex + 1];
-
-            // Check if already cached
-            if (this.streamCache.has(nextTrack.id)) {
-                console.log(`✅ Stream already cached for: ${nextTrack.title}`);
-                return;
-            }
-
-            // Check if track needs streaming
-            const isYouTubeSong = nextTrack.id && typeof nextTrack.id === 'string' &&
-                nextTrack.id.length === 11 && !nextTrack.isLocalMusic;
-            const isDabSong = nextTrack.isDabTrack || nextTrack.source === 'dab';
-
-            if (!isYouTubeSong && !isDabSong) {
-                console.log(`⏭️ Next track doesn't need prefetch: ${nextTrack.title}`);
-                return;
-            }
-
-            console.log(`🔄 Prefetching stream for next track: ${nextTrack.title}`);
-
-            const streamData = await this._fetchStreamForSong(nextTrack);
-
-            if (streamData) {
-                // Update the track in queue with stream URL
-                await TrackPlayer.updateMetadataForTrack(currentIndex + 1, {
-                    url: streamData.url,
-                    headers: streamData.headers,
-                    userAgent: streamData.headers?.['User-Agent']
-                });
-
-                // Cache the stream data
-                this.streamCache.set(nextTrack.id, streamData);
-                console.log(`✅ Prefetched stream for: ${nextTrack.title}`);
+            const smartPrefetchManager = require('./SmartPrefetchManager').default;
+            const currentIndex = await TrackPlayer.getActiveTrackIndex();
+            if (currentIndex !== null && currentIndex !== undefined) {
+                await smartPrefetchManager._prefetchNextSong(currentIndex);
             }
         } catch (error) {
-            console.error('❌ Error prefetching next track:', error);
-        } finally {
-            this.prefetchInProgress = false;
+            console.error('Error in prefetchNextTrack delegation:', error.message);
         }
     }
 

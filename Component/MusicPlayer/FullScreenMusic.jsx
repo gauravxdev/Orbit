@@ -1,5 +1,5 @@
-import React, { useState, useContext, useMemo } from "react";
-import { Dimensions, ImageBackground, View, StyleSheet, StatusBar } from "react-native";
+import React, { useState, useContext, useMemo, useCallback } from "react";
+import { Dimensions, ImageBackground, View, StyleSheet, StatusBar, InteractionManager } from "react-native";
 import LinearGradient from "react-native-linear-gradient";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { useActiveTrack } from "react-native-track-player";
@@ -217,13 +217,24 @@ export const FullScreenMusic = ({ Index, setIndex }) => {
     handlePlayerClose();
   };
 
-  const handleQueueToggle = () => {
-    setQueueIndex(queueIndex === -1 ? 1 : -1);
-  };
+  // Optimized handlers for instant button response
+  const handleQueueToggle = useCallback(() => {
+    // Immediate visual feedback - defer heavy work
+    requestAnimationFrame(() => {
+      setQueueIndex(prev => prev === -1 ? 1 : -1);
+    });
+  }, []);
 
-  const handleQueueChange = (index) => {
+  const handleQueueChange = useCallback((index) => {
     setQueueIndex(index);
-  };
+  }, []);
+
+  const handleInfoModalOpen = useCallback(() => {
+    // Instant modal open without blocking
+    requestAnimationFrame(() => {
+      setIsInfoModalVisible(true);
+    });
+  }, []);
 
   const paperTheme = useTheme();
   const hasArtworkBackground = useMemo(() => {
@@ -437,7 +448,7 @@ export const FullScreenMusic = ({ Index, setIndex }) => {
               icon="information-outline"
               size={24}
               iconColor={iconColor}
-              onPress={() => setIsInfoModalVisible(true)}
+              onPress={handleInfoModalOpen}
               style={{ margin: 0 }}
               rippleColor="rgba(255, 255, 255, 0.2)"
             />
