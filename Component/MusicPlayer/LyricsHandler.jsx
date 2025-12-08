@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext, useCallback } from 'react';
+import React, { useState, useEffect, useContext, useCallback, useRef } from 'react';
 import { ShowLyrics } from './ShowLyrics';
 import { GetLyricsButton } from './GetLyricsButton';
 import { getLyricsFromLrcLib } from '../../Api/Songs';
@@ -15,46 +15,51 @@ const ERROR_MESSAGES = {
 /**
  * Handles fetching and displaying lyrics for the currently playing track
  */
-export const LyricsHandler = ({ 
-  currentPlayingTrack, 
-  isOffline, 
-  onLyricsVisibilityChange, 
+export const LyricsHandler = ({
+  currentPlayingTrack,
+  isOffline,
+  onLyricsVisibilityChange,
   currentArtworkSource,
   iconColor,
 }) => {
   const [showDialog, setShowDialog] = useState(false);
   const [lyric, setLyric] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const isFetchingRef = useRef(false); // Prevent multiple simultaneous fetches
 
   // Notify parent component about dialog visibility changes
   useEffect(() => {
     onLyricsVisibilityChange?.(showDialog);
   }, [showDialog, onLyricsVisibilityChange]);
 
-  // Clear lyrics when dialog is closed to prevent stale data
-  useEffect(() => {
-    if (!showDialog) {
-      setLyric(null);
-    }
-  }, [currentPlayingTrack?.id, showDialog]);
-
   /**
    * Fetches lyrics for the current track
    */
   const fetchLyrics = useCallback(async () => {
-    if (!currentPlayingTrack?.title || !currentPlayingTrack?.artist) {
-      setLyric({ plain: ERROR_MESSAGES.NO_TRACK });
-      setShowDialog(true);
+    // Prevent multiple simultaneous fetches
+    if (isFetchingRef.current) {
       return;
     }
 
+    isFetchingRef.current = true;
+
+    // Open modal immediately for instant feedback
     setShowDialog(true);
     setIsLoading(true);
     setLyric(null);
 
+    if (!currentPlayingTrack?.title || !currentPlayingTrack?.artist) {
+      setLyric({ plain: ERROR_MESSAGES.NO_TRACK });
+      setIsLoading(false);
+      isFetchingRef.current = false;
+      return;
+    }
+
     try {
       if (isOffline) {
         setLyric({ plain: ERROR_MESSAGES.OFFLINE });
+        setIsLoading(false);
+        isFetchingRef.current = false;
         return;
       }
 
@@ -67,7 +72,7 @@ export const LyricsHandler = ({
       }
 
       const { syncedLyrics, plainLyrics } = lyricsData.data || {};
-      
+
       if (syncedLyrics) {
         setLyric({ synced: syncedLyrics, plain: plainLyrics });
       } else if (plainLyrics) {
@@ -80,6 +85,7 @@ export const LyricsHandler = ({
       setLyric({ plain: ERROR_MESSAGES.FETCH_ERROR });
     } finally {
       setIsLoading(false);
+      isFetchingRef.current = false;
     }
   }, [currentPlayingTrack, isOffline]);
 

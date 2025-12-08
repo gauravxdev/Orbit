@@ -9,7 +9,7 @@ import {
   getYTMusicSearchArtistData
 } from "../Api/YTMusic";
 import dabMusicService from "../Utils/DabMusicService";
-import { View, TouchableOpacity, TextInput, Pressable, Dimensions, FlatList, StyleSheet, Text, Modal, Alert } from "react-native";
+import { View, TouchableOpacity, TextInput, Pressable, Dimensions, FlatList, StyleSheet, Text, Modal, ToastAndroid, Platform } from "react-native";
 import SongDisplay from "../Component/SearchPage/SongDisplay";
 import { LoadingComponent } from "../Component/Global/Loading";
 import { getSearchPlaylistData } from "../Api/Playlist";
@@ -64,19 +64,33 @@ export const SearchPage = ({ navigation }) => {
           };
         } catch (error) {
           if (error.message === 'AUTH_REQUIRED') {
-            // User not logged in
-            Alert.alert(
-              'Login Required',
-              'You must login to use DAB Music (FLAC). Would you like to login now?',
-              [
-                { text: 'Cancel', style: 'cancel' },
-                {
-                  text: 'Login',
-                  onPress: () => navigation.navigate('Settings')
-                }
-              ]
-            );
-            setData({ data: { results: [] } });
+            // Auto-fallback to Saavn instead of blocking the user
+            if (Platform.OS === 'android') {
+              ToastAndroid.show(
+                '🎵 DAB Music requires login. Switched to JioSaavn.',
+                ToastAndroid.LONG
+              );
+            }
+
+            // Switch to Saavn source
+            await saveSelectedSource('saavn');
+
+            // Fetch data using Saavn for the current tab
+            if (ActiveTab === 0) {
+              data = await getSearchSongData(text, 1, limit);
+            } else if (ActiveTab === 1) {
+              data = await getSearchPlaylistData(text, 1, limit);
+            } else if (ActiveTab === 2) {
+              data = await getSearchAlbumData(text, 1, limit);
+            } else if (ActiveTab === 3) {
+              data = await getSearchArtistData(text, 1, limit);
+            }
+
+            if (data && data.success !== false) {
+              setData(data);
+            } else {
+              setData({ data: { results: [] } });
+            }
             setLoading(false);
             return;
           }

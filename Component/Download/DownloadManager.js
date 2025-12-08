@@ -11,7 +11,7 @@ import { getIndexQuality } from '../../MusicPlayerFunctions';
  * Provides a clean interface for downloading songs with progress tracking
  */
 export class DownloadManager {
-  
+
   /**
    * Downloads a song with progress tracking and metadata saving
    * @param {Object} songData - Song data object
@@ -227,7 +227,7 @@ export class DownloadManager {
       // Ensure we're using the highest quality artwork
       let highQualityArtwork = songData.artwork;
       if (highQualityArtwork.includes('saavncdn.com')) {
-        highQualityArtwork = highQualityArtwork.replace(/50x50|150x150|500x500/g, '500x500');
+        highQualityArtwork = highQualityArtwork.replace(/50x50|150x150|500x500|1000x1000/g, '1000x1000');
       }
 
       // Use StorageManager for artwork download

@@ -47,8 +47,8 @@ const useDynamicArtwork = () => {
 
     try {
       // For local music files, prioritize track's artwork property first
-  const st = track?.sourceType ? String(track.sourceType).toLowerCase() : null;
-  if (track.isLocal || st === 'mymusic' || st === 'download' || st === 'downloaded' || track.path) {
+      const st = track?.sourceType ? String(track.sourceType).toLowerCase() : null;
+      if (track.isLocal || st === 'mymusic' || st === 'download' || st === 'downloaded' || track.path) {
         // First, check if track already has artwork property (from downloaded songs)
         if (track.artwork) {
           // Handle require() result (number)
@@ -122,10 +122,10 @@ const useDynamicArtwork = () => {
 
       // For online tracks, use the provided artwork
       if (track.artwork) {
-        // Enhance quality for JioSaavn CDN
+        // Enhance quality for JioSaavn CDN - upgrade to 1000x1000 for high-DPI displays
         let artworkUrl = track.artwork;
         if (artworkUrl.includes('saavncdn.com')) {
-          artworkUrl = artworkUrl.replace(/50x50|150x150|500x500/g, '500x500');
+          artworkUrl = artworkUrl.replace(/50x50|150x150|500x500|1000x1000/g, '1000x1000');
         }
         return { uri: artworkUrl };
       }
@@ -154,8 +154,8 @@ const useDynamicArtwork = () => {
 
     try {
       // For local tracks, preload file existence checks
-  const st2 = track?.sourceType ? String(track.sourceType).toLowerCase() : null;
-  if (track.isLocal || st2 === 'mymusic' || st2 === 'download' || st2 === 'downloaded' || track.path) {
+      const st2 = track?.sourceType ? String(track.sourceType).toLowerCase() : null;
+      if (track.isLocal || st2 === 'mymusic' || st2 === 'download' || st2 === 'downloaded' || track.path) {
         const trackId = track.id || track.songId;
         if (trackId) {
           const gifPath = safePath(`${RNFS.DocumentDirectoryPath}/orbit_music/artwork/${trackId}.gif`);

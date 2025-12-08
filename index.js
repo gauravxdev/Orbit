@@ -16,10 +16,18 @@ if (!global.atob) {
   global.atob = decode;
 }
 
+// Disable console logs in development (keeps errors and warnings)
+if (__DEV__) {
+  console.log = () => { };
+  console.debug = () => { };
+  console.info = () => { };
+  // Keep console.warn and console.error for important messages
+}
+
 import 'react-native-gesture-handler';
-import {AppRegistry} from 'react-native';
+import { AppRegistry } from 'react-native';
 import App from './App';
-import {name as appName} from './app.json';
+import { name as appName } from './app.json';
 import * as TrackPlayer from "react-native-track-player/lib/trackPlayer";
 import { PlaybackService } from "./service";
 TrackPlayer.registerPlaybackService(() => PlaybackService);

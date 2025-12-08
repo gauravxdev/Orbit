@@ -14,6 +14,7 @@ import LoginScreen from './Component/Auth/LoginScreen';
 import CodePush from "react-native-code-push";
 import { useEffect, useRef } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import NetInfo from '@react-native-community/netinfo';
 // Firebase Analytics is initialized within AnalyticsUtils using the modular API
 // Import analytics service
 import { analyticsService, AnalyticsEvents } from './Utils/AnalyticsUtils';
@@ -68,19 +69,39 @@ function App() {
 
   useEffect(() => {
     // @ts-ignore
-    CodePush.notifyAppReady()
-    CodePush.checkForUpdate().then(update => {
-      if (update) {
-        ToastAndroid.showWithGravity(
-          `App Update Available and will be updated automatically`,
-          ToastAndroid.LONG,
-          ToastAndroid.CENTER,
-        );
-        CodePush.sync(
-          { installMode: CodePush.InstallMode.IMMEDIATE },
-        );
+    CodePush.notifyAppReady();
+
+    // Check for CodePush updates with proper error handling
+    const checkForCodePushUpdate = async () => {
+      try {
+        // Check network connectivity first
+        const netState = await NetInfo.fetch();
+
+        if (!netState.isConnected) {
+          // Skip update check if no network connection
+          return;
+        }
+
+        // Attempt to check for updates
+        const update = await CodePush.checkForUpdate();
+
+        if (update) {
+          ToastAndroid.showWithGravity(
+            `App Update Available and will be updated automatically`,
+            ToastAndroid.LONG,
+            ToastAndroid.CENTER,
+          );
+          CodePush.sync(
+            { installMode: CodePush.InstallMode.IMMEDIATE },
+          );
+        }
+      } catch (error) {
+        // Silently handle CodePush errors (network failures, server unavailable, etc.)
+        // These are non-critical and shouldn't disrupt the app
       }
-    });
+    };
+
+    checkForCodePushUpdate();
   }, [])
 
   useEffect(() => {

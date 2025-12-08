@@ -25,8 +25,8 @@ const getHighQualityArtwork = (artworkUrl) => {
 
     // Special handling for JioSaavn CDN
     if (artworkUrl.includes('saavncdn.com')) {
-      // Replace any size with 500x500 for highest quality
-      return artworkUrl.replace(/50x50|150x150|500x500/g, '500x500');
+      // Replace any size with 1000x1000 for highest quality
+      return artworkUrl.replace(/50x50|150x150|500x500|1000x1000/g, '1000x1000');
     }
 
     // For other URLs, try to add quality parameter

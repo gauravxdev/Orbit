@@ -8,6 +8,7 @@ import { useThemeContext } from '../../Context/ThemeContext'; // Added custom th
 import LinearGradient from "react-native-linear-gradient";
 import Clipboard from '@react-native-clipboard/clipboard';
 import { useProgress } from "react-native-track-player";
+import MaterialIcons from 'react-native-vector-icons/MaterialIcons';
 
 const parseLRC = (lrcString) => {
   if (!lrcString) return [];
@@ -150,6 +151,24 @@ export const ShowLyrics = ({ ShowDailog, Loading, Lyric, setShowDailog, currentA
           blurRadius={15} // Keep existing blur
         >
           <View style={{ ...StyleSheet.absoluteFillObject, backgroundColor: artworkCenterColor }} />
+          {/* Close button */}
+          <Pressable
+            onPress={() => setShowDailog(false)}
+            style={{
+              position: 'absolute',
+              top: 50,
+              right: 20,
+              zIndex: 10,
+              width: 40,
+              height: 40,
+              borderRadius: 20,
+              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <MaterialIcons name="close" size={24} color="#FFFFFF" />
+          </Pressable>
           <Pressable style={{ flex: 1, backgroundColor: 'transparent' }} onPress={() => setShowDailog(false)}>
             {/* This View consumes touch events to prevent modal close when interacting with content */}
             <View style={styles.contentWrapper} onStartShouldSetResponder={() => true}>
@@ -193,6 +212,24 @@ export const ShowLyrics = ({ ShowDailog, Loading, Lyric, setShowDailog, currentA
         </ImageBackground>
       ) : (
         <View style={{ flex: 1, backgroundColor: fallbackCenterColor }}>
+          {/* Close button */}
+          <Pressable
+            onPress={() => setShowDailog(false)}
+            style={{
+              position: 'absolute',
+              top: 50,
+              right: 20,
+              zIndex: 10,
+              width: 40,
+              height: 40,
+              borderRadius: 20,
+              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <MaterialIcons name="close" size={24} color="#FFFFFF" />
+          </Pressable>
           <Pressable style={{ flex: 1, backgroundColor: 'transparent' }} onPress={() => setShowDailog(false)}>
             {/* This View consumes touch events to prevent modal close when interacting with content */}
             <View style={styles.contentWrapper} onStartShouldSetResponder={() => true}>
