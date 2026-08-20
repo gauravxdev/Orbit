@@ -25,10 +25,32 @@ class StreamModule(reactContext: ReactApplicationContext) : ReactContextBaseJava
              NewPipe.init(downloader)
              NewPipeDownloaderInstance.downloader = downloader
         }
+        android.util.Log.i(
+            "StreamModule",
+            "StreamModule init - NewPipeExtractor v0.26.5 build $NATIVE_BUILD_MARKER"
+        )
     }
 
     override fun getName(): String {
         return "StreamModule"
+    }
+
+    /**
+     * Build marker. Logged once at init so it is possible to tell from the
+     * device log whether the NATIVE side was actually rebuilt - JS changes
+     * arrive over Metro without touching the extractor, which made a stale
+     * native binary look like a code bug.
+     */
+    @ReactMethod
+    fun getBuildInfo(promise: Promise) {
+        val info = com.facebook.react.bridge.Arguments.createMap()
+        info.putString("newPipeExtractor", "v0.26.5")
+        info.putString("streamModuleBuild", NATIVE_BUILD_MARKER)
+        promise.resolve(info)
+    }
+
+    companion object {
+        const val NATIVE_BUILD_MARKER = "2026-08-20-sabr-diagnostics"
     }
 
     /**
@@ -97,7 +119,15 @@ class StreamModule(reactContext: ReactApplicationContext) : ReactContextBaseJava
                     val audioStreams = streamInfo.audioStreams
                     
                     if (audioStreams.isEmpty()) {
-                        android.util.Log.w("StreamModule", "⚠️ No audio streams found with URL format $urlIndex, trying next...")
+                        // Zero audio streams usually means YouTube served a SABR-only
+                        // response for this player client. Record it as a real error so
+                        // the JS side reports the cause instead of a generic failure.
+                        val detail = "No audio streams returned (videoStreams=" +
+                            "${streamInfo.videoStreams.size}, " +
+                            "videoOnly=${streamInfo.videoOnlyStreams.size}) - " +
+                            "likely SABR enforcement / missing PO token"
+                        android.util.Log.w("StreamModule", "No audio streams for URL format $urlIndex: $detail")
+                        lastError = Exception(detail)
                         continue
                     }
                     

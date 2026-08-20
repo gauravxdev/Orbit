@@ -165,7 +165,11 @@ dependencies {
     } else {
         implementation jscFlavor
     }
-    implementation "com.github.TeamNewPipe:NewPipeExtractor:v0.26.2"
+    // v0.26.3 added "workaround SABR enforcement by using another player
+    // client"; v0.26.5 (2026-08-15) is the current release. Keeping this
+    // current matters - YouTube's extraction restrictions change often, and
+    // this is the resolver that can decipher signatures.
+    implementation "com.github.TeamNewPipe:NewPipeExtractor:v0.26.5"
     // Ktor & Serialization (InnerTube Port)
     implementation "io.ktor:ktor-client-core:2.3.6"
     implementation "io.ktor:ktor-client-okhttp:2.3.6"
