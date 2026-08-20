@@ -2609,6 +2609,16 @@ static async getHomeWithContinuation(sectionLimit = 20) {
    * ANDROID_VR_NO_AUTH is the best anonymous fallback.
    * ANDROID_MUSIC and IOS are additional fallbacks.
    */
+  /**
+   * Name of the last client that successfully resolved a stream.
+   * Tried first on subsequent requests so we stop burning a failed
+   * round-trip (LOGIN_REQUIRED / bot-check) on every cache miss.
+   */
+  static _lastGoodPlayerClient = null;
+
+  /** Throttle for visitorData invalidation on LOGIN_REQUIRED. */
+  static _lastVisitorReset = 0;
+
   static _PLAYER_CLIENTS = [
     {
       context: 'WEB_REMIX_CONTEXT',
@@ -2616,6 +2626,13 @@ static async getHomeWithContinuation(sectionLimit = 20) {
       clientId: '67',
       clientVersion: '1.20260405.01.00',
       requiresAuth: true,
+    },
+    {
+      context: 'IOS_CONTEXT',
+      userAgent: 'IOS_USER_AGENT',
+      clientId: '5',
+      clientVersion: '20.10.4',
+      requiresAuth: false,
     },
     {
       context: 'ANDROID_VR_CONTEXT',
@@ -2629,13 +2646,6 @@ static async getHomeWithContinuation(sectionLimit = 20) {
       userAgent: 'ANDROID_MUSIC_USER_AGENT',
       clientId: '21',
       clientVersion: '7.27.52',
-      requiresAuth: false,
-    },
-    {
-      context: 'IOS_CONTEXT',
-      userAgent: 'IOS_USER_AGENT',
-      clientId: '5',
-      clientVersion: '20.10.4',
       requiresAuth: false,
     },
   ];
@@ -2653,7 +2663,12 @@ static async getHomeWithContinuation(sectionLimit = 20) {
    * @param {boolean} preferM4A - If true, prefer M4A format for downloads (supports metadata embedding)
    * @returns {Promise<{url: string, mimeType: string, bitrate: number, duration: number, title: string, author: string, thumbnail: string}|null>}
    */
-  static async getPlayerResponse(videoId, userCookies = null, preferM4A = false) {
+  static async getPlayerResponse(
+    videoId,
+    userCookies = null,
+    preferM4A = false,
+    signal = null
+  ) {
     // Fetch visitorData (required to avoid LOGIN_REQUIRED)
     const visitorData = await this._fetchVisitorData();
 
@@ -2672,7 +2687,24 @@ static async getHomeWithContinuation(sectionLimit = 20) {
     // Generate SAPISIDHASH for authenticated requests
     const sapisidAuth = this._generateSapisidHash(cookies);
 
-    for (const clientDef of this._PLAYER_CLIENTS) {
+    // Try the client that worked last time first - YouTube bot-checks rotate
+    // between clients, so remembering the winner avoids paying for a failed
+    // LOGIN_REQUIRED round-trip on every single stream resolution.
+    const clients = [...this._PLAYER_CLIENTS];
+    if (this._lastGoodPlayerClient) {
+      const idx = clients.findIndex(
+        (c) => c.context === this._lastGoodPlayerClient
+      );
+      if (idx > 0) {
+        const [preferred] = clients.splice(idx, 1);
+        clients.unshift(preferred);
+      }
+    }
+
+    for (const clientDef of clients) {
+      if (signal?.aborted) {
+        throw new Error('AbortError');
+      }
       try {
         // Skip auth-required clients if we don't have valid cookies
         if (clientDef.requiresAuth && !sapisidAuth) {
@@ -2722,6 +2754,7 @@ static async getHomeWithContinuation(sectionLimit = 20) {
             method: 'POST',
             headers,
             body: JSON.stringify(body),
+            ...(signal ? { signal } : {}),
           }
         );
 
@@ -2739,9 +2772,21 @@ static async getHomeWithContinuation(sectionLimit = 20) {
             reason.includes('LOGIN_REQUIRED') ||
             status === 'LOGIN_REQUIRED'
           ) {
-            // Reset visitorData cache so fresh visitor ID is requested next time
-            this._visitorData = null;
-            this._visitorDataTimestamp = 0;
+            // Drop this client from the fast path so we stop leading with it
+            if (this._lastGoodPlayerClient === clientDef.context) {
+              this._lastGoodPlayerClient = null;
+            }
+
+            // Reset visitorData cache so a fresh visitor ID is requested next
+            // time - but at most once a minute. Some clients are permanently
+            // bot-checked, and refetching sw.js_data per track added a whole
+            // extra network round-trip to every stream resolution.
+            const nowTs = Date.now();
+            if (nowTs - (this._lastVisitorReset || 0) > 60000) {
+              this._lastVisitorReset = nowTs;
+              this._visitorData = null;
+              this._visitorDataTimestamp = 0;
+            }
           }
 
           continue; // Try next client
@@ -2749,14 +2794,24 @@ static async getHomeWithContinuation(sectionLimit = 20) {
 
         const result = this._extractBestAudio(data, videoId, preferM4A);
         if (result) {
-          console.log(
-            `✅ InnerTube player [${clientContext.client.clientName}] resolved stream for ${videoId}`
-          );
-          return result;
+          this._lastGoodPlayerClient = clientDef.context;
+
+          // CRITICAL: googlevideo ties the stream URL to the client that
+          // requested it. Playing an IOS-issued URL with an Android UA gets a
+          // 403 from the CDN, which surfaces as a TrackPlayer PlaybackError.
+          // Hand the caller the exact UA/client that resolved this URL.
+          return {
+            ...result,
+            userAgent: ua,
+            clientName: clientContext.client.clientName,
+          };
         }
       } catch (error) {
+        if (error.name === 'AbortError' || error.message === 'AbortError') {
+          throw error;
+        }
         console.warn(
-          `⚠️ InnerTube player [${clientDef.context}] failed for ${videoId}:`,
+          `InnerTube player [${clientDef.context}] failed for ${videoId}:`,
           error.message
         );
       }

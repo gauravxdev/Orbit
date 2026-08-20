@@ -1,4 +1,4 @@
-import React, { useRef, useCallback } from 'react';
+import React, { useCallback } from 'react';
 import { Animated, Pressable } from 'react-native';
 import { useTheme } from 'react-native-paper';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
@@ -7,20 +7,16 @@ import { PlayPreviousSong } from '../../MusicPlayerFunctions';
 export const PreviousSongButton = ({ size = 28, color, style }) => {
   const theme = useTheme();
   const scaleAnim = React.useRef(new Animated.Value(1)).current;
-  const isProcessingRef = useRef(false);
 
   const handlePress = useCallback(() => {
-    if (isProcessingRef.current) {
-      return;
-    }
-
-    isProcessingRef.current = true;
-
-    // Start animation AFTER setting processing flag (action takes priority)
+    // No local lock: rapid presses are coalesced into a single jump by the
+    // skip scheduler in MusicPlayerFunctions. The old isProcessingRef guard
+    // silently swallowed every press made during a slow skip, which is what
+    // made the controls feel frozen.
     Animated.sequence([
       Animated.timing(scaleAnim, {
         toValue: 0.85,
-        duration: 50, // Faster
+        duration: 50,
         useNativeDriver: true,
       }),
       Animated.spring(scaleAnim, {
@@ -30,15 +26,7 @@ export const PreviousSongButton = ({ size = 28, color, style }) => {
       }),
     ]).start();
 
-    // Fire and forget - SkipOperationManager handles debouncing
-    PlayPreviousSong()
-      .catch((error) => {})
-      .finally(() => {
-        // Match SkipOperationManager's debounce (50ms)
-        setTimeout(() => {
-          isProcessingRef.current = false;
-        }, 100);
-      });
+    PlayPreviousSong().catch(() => {});
   }, [scaleAnim]);
 
   const buttonSize = 44; // Fixed size for the button container

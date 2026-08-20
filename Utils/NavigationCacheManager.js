@@ -237,6 +237,9 @@ class NavigationCacheManager {
       url: entry.url,
       format: entry.format || null,
       mimeType: entry.mimeType || null,
+      userAgent: entry.userAgent || null,
+      bitrate: entry.bitrate || null,
+      resolvedBy: entry.resolvedBy || null,
     };
   }
 
@@ -271,6 +274,9 @@ class NavigationCacheManager {
           url: entry.url,
           format: entry.format || null,
           mimeType: entry.mimeType || null,
+          userAgent: entry.userAgent || null,
+          bitrate: entry.bitrate || null,
+          resolvedBy: entry.resolvedBy || null,
         };
       }
     } catch (e) {
@@ -307,6 +313,13 @@ class NavigationCacheManager {
       // Store format metadata for correct file extension on download
       format: metadata.format || null,
       mimeType: metadata.mimeType || null,
+      // CRITICAL: the UA the URL was issued to. Replaying a cached URL with a
+      // different UA gets a 403 from googlevideo.
+      userAgent: metadata.userAgent || null,
+      bitrate: metadata.bitrate || null,
+      // Which resolver produced this URL ('native' | 'innertube'), so a
+      // playback failure can retry with the other one.
+      resolvedBy: metadata.resolvedBy || null,
     };
 
     // 1. RAM
@@ -340,6 +353,23 @@ class NavigationCacheManager {
    */
   hasStreamUrl(videoId, source = 'ytmusic') {
     return this.getStreamUrl(videoId, source) !== null;
+  }
+
+  /**
+   * Drop one cached stream URL (RAM + disk).
+   * Used when playback fails on a URL that looked valid - googlevideo URLs can
+   * expire or be rejected before our TTL runs out, and re-resolving is
+   * pointless if the stale URL is just served straight back from cache.
+   * @param {string} videoId
+   * @param {string} source
+   */
+  invalidateStreamUrl(videoId, source = 'ytmusic') {
+    if (!videoId) {
+      return;
+    }
+    const key = `${source}_${videoId}`;
+    this.streamCache.delete(key);
+    AsyncStorage.removeItem(`stream_${key}`).catch(() => {});
   }
 
   /**

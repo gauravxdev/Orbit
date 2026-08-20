@@ -6,7 +6,7 @@ import LinearGradient from "react-native-linear-gradient";
 import AntDesign from "react-native-vector-icons/AntDesign";
 import Ionicons from "react-native-vector-icons/Ionicons";
 import MaterialIcons from "react-native-vector-icons/MaterialIcons";
-import TrackPlayer, { State } from 'react-native-track-player';
+import TrackPlayer, { State, useActiveTrack } from 'react-native-track-player';
 import DeviceInfo from 'react-native-device-info';
 import RNFS from 'react-native-fs';
 import { getAlbumData } from "../../Api/Album";
@@ -19,9 +19,8 @@ import { AddPlaylist, PlayOneSong, PauseSong, PlaySong, getIndexQuality } from "
 import { truncateText, FormatTitleAndArtist } from "../../Utils/FormatTitleAndArtist";
 import FormatArtist from "../../Utils/FormatArtists";
 import { StorageManager } from '../../Utils/StorageManager';
-import { UnifiedDownloadService } from '../../Utils/UnifiedDownloadService';
+import { downloadSongNow } from '../../hooks/useDownloadSong';
 import { ensureDirectoryExists } from '../../Utils/FileUtils';
-import EventRegister from '../../Utils/EventRegister';
 import Context from '../../Context/Context';
 import { useThemeContext } from '../../Context/ThemeContext';
 import { PlayButton } from './PlayButton';
@@ -76,7 +75,10 @@ const CircularProgress = ({ progress, size = 20, thickness = 2, color }) => {
 // };
 
 export const AlbumDetails = ({ name, releaseData, liked, Data }) => {
-  const { updateTrack, currentPlaying } = useContext(Context);
+  const { updateTrack } = useContext(Context);
+  // Read the active track from TrackPlayer instead of app Context so a track
+  // change only re-renders the components that show it.
+  const currentPlaying = useActiveTrack();
   const { theme } = useThemeContext();
   const [isCurrentlyPlaying, setIsCurrentlyPlaying] = useState(false);
   const [downloadStatus, setDownloadStatus] = useState({});
@@ -301,34 +303,21 @@ export const AlbumDetails = ({ name, releaseData, liked, Data }) => {
           }));
 
           try {
-            // Prepare song data for unified service
-            const songData = {
-              id: song.id,
-              title: song.name || 'Unknown',
-              artist: song.artists?.primary || 'Unknown',
-              album: name || 'Unknown',
-              downloadUrl: song.downloadUrl,
-              download_url: song.download_url,
-              url: song.url,
-              image: song.image,
-              artwork: song.artwork,
-              duration: song.duration || 0,
-              // Preserve source for proper download handling
-              source: song.source || 'saavn',
-              isDabTrack: song.isDabTrack || false
-            };
-
-            // Use unified download service with progress callback
-            const success = await UnifiedDownloadService.downloadSong(songData, (progress) => {
-              // Update progress for this specific song
-              setDownloadStatus(prev => ({
-                ...prev,
-                [song.id]: {
-                  ...prev[song.id],
-                  progress: progress
-                }
-              }));
-            });
+            // Shared helper normalises the payload and detects the real source
+            const success = await downloadSongNow(
+              song,
+              (progress) => {
+                // Update progress for this specific song
+                setDownloadStatus(prev => ({
+                  ...prev,
+                  [song.id]: {
+                    ...prev[song.id],
+                    progress: progress
+                  }
+                }));
+              },
+              { album: name }
+            );
 
             if (success) {
               // Mark as downloaded

@@ -92,9 +92,23 @@ export class UnifiedDownloadService {
         throw new Error('Failed to download song file');
       }
 
+      // Try the upgraded artwork first, then the fallback. The high quality
+      // variant (maxresdefault) does not exist for every video, so without a
+      // second attempt an upgrade could silently lose the artwork entirely.
       let artworkDownloadSuccess = false;
-      const artworkUrl = this.getArtworkUrl(song);
-      if (artworkUrl) {
+      // The candidate that actually downloaded, recorded for the metadata.
+      let usedArtworkUrl = null;
+      const artworkCandidates = [
+        this.getArtworkUrl(song),
+        song.artworkFallback,
+      ].filter(
+        (url, index, all) =>
+          typeof url === 'string' &&
+          url.startsWith('http') &&
+          all.indexOf(url) === index
+      );
+
+      for (const artworkUrl of artworkCandidates) {
         try {
           artworkDownloadSuccess = await downloadFileWithAnalytics(
             artworkUrl,
@@ -112,27 +126,34 @@ export class UnifiedDownloadService {
               const fileInfo = await RNFS.stat(artworkPath);
               if (fileInfo.size < 100) {
                 console.warn(
-                  `🎨 [Artwork] Downloaded file too small (${fileInfo.size} bytes), likely invalid`
+                  `[Artwork] Downloaded file too small (${fileInfo.size} bytes), likely invalid`
                 );
                 artworkDownloadSuccess = false;
-                await RNFS.unlink(artworkPath).catch(() => { });
+                await RNFS.unlink(artworkPath).catch(() => {});
               }
             } else {
               console.warn(
-                '🎨 [Artwork] Download reported success but file not found'
+                '[Artwork] Download reported success but file not found'
               );
               artworkDownloadSuccess = false;
             }
-          } else {
-            console.warn(`🎨 [Artwork] Download FAILED for: ${song.title}`);
           }
         } catch (artworkError) {
           console.error(
-            '🎨 [Artwork] Error downloading artwork:',
+            '[Artwork] Error downloading artwork:',
             artworkError.message
           );
           artworkDownloadSuccess = false;
         }
+
+        if (artworkDownloadSuccess) {
+          usedArtworkUrl = artworkUrl;
+          break;
+        }
+      }
+
+      if (!artworkDownloadSuccess && artworkCandidates.length > 0) {
+        console.warn(`[Artwork] All artwork candidates failed for: ${song.title}`);
       }
 
       const formatInfo = await detectAudioFormat(songPath);
@@ -192,7 +213,7 @@ export class UnifiedDownloadService {
         artist: this.formatArtist(song.artist) || 'Unknown Artist',
         album: song.album || 'Unknown Album',
         url: downloadUrl,
-        artwork: artworkUrl,
+        artwork: usedArtworkUrl || artworkCandidates[0] || null,
         localSongPath: finalSongPath,
         localArtworkPath:
           artworkDownloadSuccess && !metadataEmbedded ? artworkPath : null,

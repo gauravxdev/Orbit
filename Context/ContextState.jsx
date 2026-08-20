@@ -1,4 +1,5 @@
 import Context from './Context';
+import QueueContext from './QueueContext';
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { AppState, DeviceEventEmitter } from 'react-native';
 import TrackPlayer, {
@@ -11,6 +12,10 @@ import FormatArtist from '../Utils/FormatArtists';
 import { EachSongMenuModal } from '../Component/Global/EachSongMenuModal';
 import { CacheManager as LegacyCacheManager } from '../Utils/CacheManager';
 import historyManager from '../Utils/HistoryManager';
+import {
+  getQueueSnapshot,
+  invalidateQueueSnapshot,
+} from '../Utils/QueueSnapshot';
 
 // Repeat constants
 const Repeats = {
@@ -27,7 +32,6 @@ const events = [
 const ContextState = (props) => {
   const [Index, setIndex] = useState(0);
   const [QueueIndex, setQueueIndex] = useState(0);
-  const [currentPlaying, setCurrentPlaying] = useState({});
   const [Repeat, setRepeat] = useState(Repeats.NoRepeat);
   const [Visible, setVisible] = useState({
     visible: false,
@@ -66,7 +70,7 @@ const ContextState = (props) => {
     // This prevents blocking the progress slider during track change
     requestAnimationFrame(async () => {
       try {
-        const tracks = await TrackPlayer.getQueue();
+        const tracks = await getQueueSnapshot();
         // PERFORMANCE: Use O(1) comparison instead of O(n) JSON.stringify
         // Compare length and first/last IDs - if these match, queue is likely unchanged
         // FIX: Always update if new tracks were added (length increased)
@@ -122,7 +126,7 @@ const ContextState = (props) => {
     const currentQueueLength = QueueRef.current.length;
     if (currentQueueLength === 0) {
       // If local queue is empty, fallback to native fetch just in case
-      const tracks = await TrackPlayer.getQueue();
+      const tracks = await getQueueSnapshot();
       if (index < tracks.length - 2) {
         return;
       }
@@ -134,7 +138,7 @@ const ContextState = (props) => {
     }
 
     // Only if we passed the check, get full queue to proceed with logic
-    const tracks = await TrackPlayer.getQueue();
+    const tracks = await getQueueSnapshot();
     const totalTracks = tracks.length - 1;
     if (index >= totalTracks - 2) {
       try {
@@ -179,73 +183,23 @@ const ContextState = (props) => {
 
     try {
       if (event.type === Event.PlaybackError) {
-        console.warn('An error occured while playing the current track.');
-
-        // Log error details for debugging
-        try {
-          const currentTrack = await TrackPlayer.getActiveTrack();
-          if (currentTrack) {
-            console.error(`❌ Playback error for: ${currentTrack.title}`);
-
-            // IMPROVED: Try on-demand fetch before skipping
-            // This recovers tracks that weren't prefetched in time
-            const smartPrefetchManager =
-              require('../Utils/SmartPrefetchManager').default;
-
-            if (smartPrefetchManager.needsStream(currentTrack)) {
-              try {
-                const streamData = await smartPrefetchManager.fetchOnDemand(
-                  currentTrack.id
-                );
-
-                if (streamData && streamData.url) {
-                  // Replace the track with the fetched URL and play
-                  const currentIndex = await TrackPlayer.getActiveTrackIndex();
-                  const updatedTrack = {
-                    ...currentTrack,
-                    url: streamData.url,
-                    headers: streamData.headers,
-                    _needsStream: false,
-                    _prefetched: true,
-                  };
-
-                  await TrackPlayer.remove(currentIndex);
-                  await TrackPlayer.add(updatedTrack, currentIndex);
-                  await TrackPlayer.skip(currentIndex);
-                  await TrackPlayer.play();
-                  return; // Recovery successful, don't skip
-                }
-              } catch (recoveryError) { }
-            }
-          }
-        } catch (error) {
-          console.error('Error getting track info during error:', error);
-        }
-
-        // FALLBACK: If on-demand fetch failed, skip to next track
-        setTimeout(async () => {
-          try {
-            const state = await TrackPlayer.getPlaybackState();
-
-            // If still in error state, skip to next
-            if (state.state === 'error' || state.state === 'none') {
-              await TrackPlayer.skipToNext();
-              await TrackPlayer.play();
-            }
-          } catch (err) {
-            console.error('Error in fallback recovery:', err);
-          }
-        }, 1000); // Reduced from 2000ms since we already tried on-demand fetch
+        // NOTE: recovery is owned solely by SmartPrefetchManager's
+        // PlaybackError handler. This used to run a second, independent
+        // recovery (fetch + remove + add + skip + play) against the same
+        // index, duplicating the network work and racing the other handler
+        // into index shifts - which is what stretched a failed stream into a
+        // multi-second freeze. Keep this as logging only.
+        console.warn('Playback error reported for the current track.');
       }
 
       if (event.type === Event.PlaybackActiveTrackChanged) {
         // PERFORMANCE: Use event.track.id directly instead of blocking historyManager.getCurrentTrackingInfo() call
         const newTrackId = event.track?.id;
 
-        // ✅ DEFER UI UPDATE: Use setImmediate to prevent blocking during track transition
-        setImmediate(() => {
-          setCurrentPlaying(event.track);
-        });
+        // NOTE: the active track is no longer mirrored into React state here.
+        // Components read it via TrackPlayer's useActiveTrack() hook, which
+        // only re-renders the components that actually display it instead of
+        // every Context consumer in the tree.
 
         // Only process if it's actually a different track
         // Compare with last known track ID to avoid redundant operations
@@ -276,51 +230,21 @@ const ContextState = (props) => {
             );
           });
 
-          // 🎵 CRITICAL FIX: Trigger prefetch from ContextState as backup
-          // SmartPrefetchManager's event listeners can be lost after Metro hot reload
-          // This ensures continuous prefetching works reliably for all sources
+          // Prefetch is owned by SmartPrefetchManager's own track-change
+          // listener. ContextState used to kick off an identical N+1/N+2 pass
+          // here, so every track change resolved each upcoming stream twice
+          // and both passes rewrote the same queue entries. All we keep is the
+          // hot-reload guard that re-registers the manager's listeners.
           if (event.track?.id) {
-            const isStreamingSource =
-              event.track.source === 'ytmusic' ||
-              event.track.isYTMusic === true ||
-              (event.track.id?.length === 11 && !event.track.isLocalMusic);
-
-            if (isStreamingSource) {
-              // Defer prefetch to avoid blocking UI
-              setImmediate(async () => {
-                try {
-                  const smartPrefetchManager =
-                    require('../Utils/SmartPrefetchManager').default;
-
-                  // Ensure manager is initialized (handles hot reload case)
-                  if (!smartPrefetchManager.isInitialized) {
-                    smartPrefetchManager.initialize();
-                  }
-
-                  // Trigger sequential prefetch: N+1 then N+2
-                  await smartPrefetchManager._prefetchNextFromCurrent();
-
-                  // N+2 after N+1 completes
-                  setImmediate(async () => {
-                    try {
-                      const TrackPlayer =
-                        require('react-native-track-player').default;
-                      const currentIdx =
-                        await TrackPlayer.getActiveTrackIndex();
-                      if (currentIdx !== null && currentIdx !== undefined) {
-                        await smartPrefetchManager._prefetchTrackAtIndex(
-                          currentIdx + 2
-                        );
-                      }
-                    } catch (e) {
-                      // Silence expected errors
-                      if (!e.message?.includes("doesn't exist")) {
-                      }
-                    }
-                  });
-                } catch (prefetchError) { }
-              });
-            }
+            setImmediate(() => {
+              try {
+                const smartPrefetchManager =
+                  require('../Utils/SmartPrefetchManager').default;
+                if (!smartPrefetchManager.isInitialized) {
+                  smartPrefetchManager.initialize();
+                }
+              } catch (prefetchError) {}
+            });
           }
 
           // ✅ Add recommendations async (non-blocking)
@@ -393,24 +317,13 @@ const ContextState = (props) => {
       setTimeout(async () => {
         try {
           await updateTrack();
-          await getCurrentSong();
         } catch (error) {
           console.error('Error in delayed setup:', error);
         }
       }, 500);
     }
   }
-  async function getCurrentSong() {
-    if (!isPlayerReady.current) {
-      return;
-    }
-    try {
-      const song = await TrackPlayer.getActiveTrack();
-      setCurrentPlaying(song);
-    } catch (error) {
-      setCurrentPlaying({});
-    }
-  }
+
   useEffect(() => {
     InitialSetup();
 
@@ -486,6 +399,8 @@ const ContextState = (props) => {
           clearTimeout(queueUpdateTimeout);
         }
 
+        invalidateQueueSnapshot();
+
         // For progressive batches, skip immediate sync - they just add songs at the end
         // The threshold-based loader adds small batches frequently
         if (event?.isProgressiveBatch) {
@@ -521,7 +436,6 @@ const ContextState = (props) => {
   // Memoize context value to prevent unnecessary re-renders
   const contextValue = useMemo(
     () => ({
-      currentPlaying,
       Repeat,
       setRepeat,
       updateTrack,
@@ -530,7 +444,6 @@ const ContextState = (props) => {
       QueueIndex,
       setQueueIndex,
       setVisible,
-      Queue,
       previousScreen,
       setPreviousScreen,
       musicPreviousScreen,
@@ -545,11 +458,9 @@ const ContextState = (props) => {
       setFullScreenNavigationTarget,
     }),
     [
-      currentPlaying,
       Repeat,
       Index,
       QueueIndex,
-      Queue,
       previousScreen,
       musicPreviousScreen,
       currentPlaylistData,
@@ -559,10 +470,18 @@ const ContextState = (props) => {
     ]
   );
 
+  // Queue lives in its own provider so queue churn doesn't re-render the app
+  const queueContextValue = useMemo(
+    () => ({ Queue, updateTrack }),
+    [Queue]
+  );
+
   return (
     <Context.Provider value={contextValue}>
-      {props.children}
-      <EachSongMenuModal setVisible={setVisible} Visible={Visible} />
+      <QueueContext.Provider value={queueContextValue}>
+        {props.children}
+        <EachSongMenuModal setVisible={setVisible} Visible={Visible} />
+      </QueueContext.Provider>
     </Context.Provider>
   );
 };

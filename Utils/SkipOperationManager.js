@@ -19,6 +19,11 @@ class SkipOperationManager {
     this.consecutiveSkipErrors = 0;
     this.maxConsecutiveErrors = 3;
     this.debounceDelay = 50; // ms - Reduced for instant response
+
+    // A skip requested while another is running (see executeSkip)
+    this.pendingOperation = null;
+    this.pendingPromise = null;
+    this.pendingResolve = null;
   }
 
   /**
@@ -75,9 +80,20 @@ class SkipOperationManager {
       this.skipDebounceTimer = null;
     }
 
-    // If already skipping, queue this skip or ignore based on immediate flag
+    // If a skip is already running, queue this one instead of dropping it.
+    // Dropping is what made the controls feel broken: a press during a slow
+    // skip vanished with no feedback. Only the most recent request is kept -
+    // callers compute an absolute target, so the newest one supersedes.
     if (this.isSkipping) {
-      return false;
+      this.pendingOperation = operation;
+
+      if (!this.pendingPromise) {
+        this.pendingPromise = new Promise((resolve) => {
+          this.pendingResolve = resolve;
+        });
+      }
+
+      return this.pendingPromise;
     }
 
     // Cancel any in-flight fetch operations
@@ -117,6 +133,21 @@ class SkipOperationManager {
     } finally {
       this.isSkipping = false;
       this.abortController = null;
+
+      // Run whatever was requested while this skip was in flight.
+      const queued = this.pendingOperation;
+      const resolveQueued = this.pendingResolve;
+      this.pendingOperation = null;
+      this.pendingPromise = null;
+      this.pendingResolve = null;
+
+      if (queued) {
+        this._performSkip(queued)
+          .then((queuedResult) => resolveQueued?.(queuedResult))
+          .catch(() => resolveQueued?.(false));
+      } else if (resolveQueued) {
+        resolveQueued(true);
+      }
     }
   }
 
@@ -130,6 +161,12 @@ class SkipOperationManager {
     }
     this.cancelInFlightOperations();
     this.isSkipping = false;
+    this.pendingOperation = null;
+    this.pendingPromise = null;
+    if (this.pendingResolve) {
+      this.pendingResolve(false);
+      this.pendingResolve = null;
+    }
   }
 }
 

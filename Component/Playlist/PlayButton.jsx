@@ -2,7 +2,7 @@ import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import Entypo from 'react-native-vector-icons/Entypo';
 import { useTheme } from '@react-navigation/native';
 import { useContext, useEffect, useState } from 'react';
-import TrackPlayer, { State } from 'react-native-track-player';
+import TrackPlayer, { State, useActiveTrack } from 'react-native-track-player';
 import Context from '../../Context/Context';
 
 export const PlayButton = ({
@@ -15,7 +15,7 @@ export const PlayButton = ({
 }) => {
   const theme = useTheme();
   const [isPlaying, setIsPlaying] = useState(false);
-  const { currentPlaying } = useContext(Context);
+  const currentPlaying = useActiveTrack();
   const [isPressed, setIsPressed] = useState(false);
 
   // Effect to check if currently playing

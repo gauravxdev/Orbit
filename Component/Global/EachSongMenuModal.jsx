@@ -14,7 +14,7 @@ import FormatTitleAndArtist from '../../Utils/FormatTitleAndArtist';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import DeviceInfo from 'react-native-device-info';
 import { AddSongsToQueue, getIndexQuality } from '../../MusicPlayerFunctions';
-import { UnifiedDownloadService } from '../../Utils/UnifiedDownloadService';
+import { downloadSongNow } from '../../hooks/useDownloadSong';
 import Context from '../../Context/Context';
 import TrackPlayer from 'react-native-track-player';
 import {
@@ -182,41 +182,14 @@ export const EachSongMenuModal = ({ Visible, setVisible }) => {
 
   async function actualDownload() {
     try {
-      // Prepare song data for unified service
-      // CRITICAL: Preserve the original source (dab, ytmusic, spotify, saavn)
-      // to ensure correct stream URL fetching in UnifiedDownloadService
-      const songData = {
-        id: Visible?.id,
-        title: Visible?.title,
-        artist: Visible?.artist,
-        url: Visible?.url,
-        image: Visible?.image,
-        artwork: Visible?.image,
-        duration: Visible?.duration,
-        language: Visible?.language,
-        // Preserve source and detection flags from original song data
-        source: Visible?.source || 'saavn',
-        isDabTrack: Visible?.isDabTrack || false,
-        spotifyId: Visible?.spotifyId,
-        downloadUrl: Visible?.downloadUrl || Visible?.url, // Pass full URL array for Saavn
-      };
-
-      // Use unified download service
-      const success = await UnifiedDownloadService.downloadSong(songData);
-
-      if (success) {
-        ToastAndroid.showWithGravity(
-          'Download successfully completed',
-          ToastAndroid.SHORT,
-          ToastAndroid.CENTER
-        );
-      } else {
-        ToastAndroid.showWithGravity(
-          'Download failed',
-          ToastAndroid.SHORT,
-          ToastAndroid.CENTER
-        );
-      }
+      // Shared normalisation detects the real source (ytmusic / dab / spotify /
+      // saavn) from the song data. This used to hardcode a 'saavn' fallback,
+      // which sent YouTube and DAB tracks down the wrong download path.
+      // downloadSongNow reports its own success/failure toast.
+      await downloadSongNow({
+        ...Visible,
+        downloadUrl: Visible?.downloadUrl || Visible?.url,
+      });
 
       setVisible({ visible: false });
     } catch (error) {

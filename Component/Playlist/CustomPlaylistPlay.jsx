@@ -2,7 +2,7 @@ import React, { useContext, useEffect, useState } from 'react';
 import { useTheme } from '@react-navigation/native';
 import { TouchableOpacity, Text, View, StyleSheet } from 'react-native';
 import Ionicons from 'react-native-vector-icons/Ionicons';
-import TrackPlayer from 'react-native-track-player';
+import TrackPlayer, { useActiveTrack } from 'react-native-track-player';
 import Context from '../../Context/Context';
 
 export const CustomPlaylistPlay = ({
@@ -12,7 +12,7 @@ export const CustomPlaylistPlay = ({
 }) => {
   const theme = useTheme();
   const [isPlaying, setIsPlaying] = useState(false);
-  const { currentPlaying } = useContext(Context);
+  const currentPlaying = useActiveTrack();
 
   const getContrastingTextColor = (hexColor) => {
     if (!hexColor || hexColor.length < 7) {

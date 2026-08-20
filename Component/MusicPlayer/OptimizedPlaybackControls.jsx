@@ -111,14 +111,10 @@ const PlayPauseButton = memo(({ size = 64, color = '#fff' }) => {
 
 // Skip buttons - completely isolated
 const SkipButton = memo(({ direction = 'next', size = 36, color = '#fff' }) => {
-  const isProcessing = useRef(false);
 
   const handleSkip = useCallback(async () => {
-    // Prevent rapid double-taps
-    if (isProcessing.current) {
-      return;
-    }
-    isProcessing.current = true;
+    // Rapid presses are coalesced by the skip scheduler, so they are no longer
+    // dropped here.
 
     try {
       if (direction === 'next') {
@@ -128,11 +124,6 @@ const SkipButton = memo(({ direction = 'next', size = 36, color = '#fff' }) => {
       }
     } catch (error) {
       console.error(`Skip ${direction} error:`, error);
-    } finally {
-      // Reset after debounce period
-      setTimeout(() => {
-        isProcessing.current = false;
-      }, 300); // Match SkipOperationManager debounce
     }
   }, [direction]);
 

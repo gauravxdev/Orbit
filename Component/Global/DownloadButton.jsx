@@ -6,8 +6,7 @@ import { SmallText } from './SmallText';
 import { PermissionsAndroid, Platform } from 'react-native';
 import DeviceInfo from 'react-native-device-info';
 import { StorageManager } from '../../Utils/StorageManager';
-import { UnifiedDownloadService } from '../../Utils/UnifiedDownloadService';
-import EventRegister from '../../Utils/EventRegister';
+import { downloadSongNow } from '../../hooks/useDownloadSong';
 
 // Circular progress component for download indicator
 const CircularProgress = ({
@@ -201,10 +200,8 @@ export const DownloadButton = ({
         }
 
         setIsDownloading(true);
-        const success = await UnifiedDownloadService.downloadSong({
-          ...song,
+        const success = await downloadSongNow(song, null, {
           album: albumName,
-          source: song.source || 'saavn',
         });
 
         if (success) {
@@ -254,10 +251,8 @@ export const DownloadButton = ({
         setOverallProgress(Math.floor((i / songsToDownload.length) * 100));
 
         try {
-          const success = await UnifiedDownloadService.downloadSong({
-            ...song,
+          const success = await downloadSongNow(song, null, {
             album: albumName,
-            source: song.source || 'saavn',
           });
 
           if (success) {

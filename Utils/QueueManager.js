@@ -6,6 +6,7 @@ import dabRecommendationService from './DABRecommendationService';
 import { getIndexQuality } from '../MusicPlayerFunctions';
 import InnerTubeClient from '../Api/InnertubeClient';
 import { CacheManager } from './NavigationCacheManager';
+import { getQueueSnapshot } from './QueueSnapshot';
 import { InteractionManager } from 'react-native';
 
 /**
@@ -191,26 +192,27 @@ class QueueManager {
    */
   async fetchStreamForTrack(trackIndex, signal = null) {
     try {
-      const queue = await TrackPlayer.getQueue();
+      // PERFORMANCE: getTrack() checks bounds without serializing the queue
+      const track =
+        trackIndex >= 0 ? await TrackPlayer.getTrack(trackIndex) : null;
 
-      if (trackIndex < 0 || trackIndex >= queue.length) {
-        console.error('❌ Invalid track index:', trackIndex);
+      if (!track) {
+        console.error('Invalid track index:', trackIndex);
         return null;
       }
-
-      const track = queue[trackIndex];
 
       // Check central cache first (Hybrid) - now returns object with url, format, mimeType
       const cachedData = await CacheManager.getStreamUrlAsync(
         track.id,
         track.source || 'ytmusic'
       );
-      if (cachedData && cachedData.url) {
+      // Only reuse a cached URL when we know which client it was issued to -
+      // googlevideo rejects a stream replayed with a different User-Agent.
+      if (cachedData && cachedData.url && cachedData.userAgent) {
         return {
           url: cachedData.url,
           headers: {
-            'User-Agent':
-              'com.google.android.youtube/19.09.37 (Linux; U; Android 12; en_IN)',
+            'User-Agent': cachedData.userAgent,
             Range: 'bytes=0-',
           },
           format: cachedData.format,
@@ -244,6 +246,10 @@ class QueueManager {
           {
             format: streamData.format || null,
             mimeType: streamData.mimeType || null,
+            // Record the issuing client so the URL can be replayed correctly
+            userAgent:
+              streamData.userAgent || streamData.headers?.['User-Agent'] || null,
+            bitrate: streamData.bitrate || null,
           }
         );
         return streamData;
@@ -401,7 +407,9 @@ class QueueManager {
     }
 
     try {
-      const queue = await TrackPlayer.getQueue();
+      // Shared snapshot - one serialization per track change instead of one
+      // per service that wants to look at the queue.
+      const queue = await getQueueSnapshot();
       const currentIndex =
         event.index ?? (await TrackPlayer.getActiveTrackIndex());
 

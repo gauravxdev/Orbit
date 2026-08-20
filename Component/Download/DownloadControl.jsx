@@ -158,7 +158,7 @@ export const LargeDownloadControl = ({
 };
 
 // Import hook here to avoid circular dependencies if possible, or just require it
-import { useUnifiedDownload } from './useUnifiedDownload';
+import { useDownloadSong } from '../../hooks/useDownloadSong';
 
 /**
  * SmartDownloadControl - Wrapper that handles logic internally
@@ -175,7 +175,7 @@ export const SmartDownloadControl = ({
     downloadProgress,
     startDownload,
     canDownload,
-  } = useUnifiedDownload(songData, isOffline);
+  } = useDownloadSong(songData, { isOffline });
 
   return (
     <DownloadControl

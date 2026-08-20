@@ -12,6 +12,7 @@
  */
 
 import TrackPlayer, { Event } from 'react-native-track-player';
+import { getQueueLength, invalidateQueueSnapshot } from './QueueSnapshot';
 import { InteractionManager, DeviceEventEmitter } from 'react-native';
 
 // Configuration constants
@@ -161,8 +162,8 @@ class LocalMusicQueueManager {
         }
 
         // Check if we need to load more songs (approaching end of loaded queue)
-        const queue = await TrackPlayer.getQueue();
-        const remainingLoaded = queue.length - currentIndex - 1;
+        const queueLength = await getQueueLength();
+        const remainingLoaded = queueLength - currentIndex - 1;
 
         if (
           remainingLoaded <= LOAD_THRESHOLD &&
@@ -220,6 +221,7 @@ class LocalMusicQueueManager {
 
       if (batch.length > 0) {
         await TrackPlayer.add(batch);
+        invalidateQueueSnapshot();
         this.loadedEndIndex = batchEnd;
 
         // Emit event for UI updates
@@ -263,6 +265,7 @@ class LocalMusicQueueManager {
           // Remove in reverse order to maintain indices
           for (let i = indicesToRemove.length - 1; i >= 0; i--) {
             await TrackPlayer.remove(indicesToRemove[i]);
+            invalidateQueueSnapshot();
           }
 
           this.loadedStartIndex += indicesToRemove.length;

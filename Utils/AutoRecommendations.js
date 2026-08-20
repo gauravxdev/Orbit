@@ -19,6 +19,7 @@ import NetInfo from '@react-native-community/netinfo';
 import YouTubeMusicService from './YouTubeMusicService';
 import FormatTitleAndArtist from '../Utils/FormatTitleAndArtist';
 import { upgradeArtworkQuality } from './YTMusicArtworkUtils';
+import { getQueueSnapshot } from './QueueSnapshot';
 
 class AutoRecommendations {
   constructor() {
@@ -61,8 +62,8 @@ class AutoRecommendations {
     }
 
     try {
-      const queue = await TrackPlayer.getQueue();
-      const currentIndex = await TrackPlayer.getCurrentTrack();
+      const queue = await getQueueSnapshot();
+      const currentIndex = await TrackPlayer.getActiveTrackIndex();
 
       if (currentIndex === null || !queue || queue.length === 0) {
         return;

@@ -33,7 +33,8 @@ import {
 import { PlaylistHeader } from './PlaylistHeader';
 import { PlainText } from '../Global/PlainText';
 import Context from '../../Context/Context';
-import TrackPlayer from 'react-native-track-player';
+import QueueContext from '../../Context/QueueContext';
+import TrackPlayer, { useActiveTrack } from 'react-native-track-player';
 
 // Default image constants moved outside component to prevent re-creation
 const DEFAULT_MUSIC_IMAGE = require('../../Images/default.jpg');
@@ -217,8 +218,14 @@ export const CustomPlaylistView = (props) => {
 
   const navigation = useNavigation();
   // const theme = useTheme(); // Already added in previous step
-  const { Queue, setQueue, setCurrentPlaying, currentPlaying, updateTrack } =
-    useContext(Context);
+  const { updateTrack } = useContext(Context);
+  const { Queue } = useContext(QueueContext);
+  const currentPlaying = useActiveTrack();
+  // `setQueue` was never actually provided by the context - the branches that
+  // reference it are guarded and have always been inert. Kept explicit so the
+  // behaviour is unchanged.
+  const setQueue = undefined;
+  const setCurrentPlaying = undefined;
   const initializationComplete = useRef(false);
   const chunkedRefs = useRef({});
   const flatListRef = useRef(null);

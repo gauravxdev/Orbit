@@ -20,7 +20,7 @@ import PlaylistSelectorWrapper from '../Playlist/PlaylistSelectorWrapper';
 import { GlassBox } from '../Global/GlassBox';
 import { BlurView } from '@react-native-community/blur';
 import { useSongPlayback } from './hooks/useSongPlayback';
-import { useSongDownload } from './hooks/useSongDownload';
+import { useDownloadSong } from '../../hooks/useDownloadSong';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -49,7 +49,11 @@ export const EachSongMenuButton = ({
     isDownloaded,
     downloadSong,
     deleteSong
-  } = useSongDownload(song, propIsDownloaded, onDelete, closeMenu);
+  } = useDownloadSong(song, {
+    isDownloaded: propIsDownloaded,
+    onDelete,
+    closeMenu,
+  });
 
   const getMarginRight = () => {
     if (isFromAlbum) {

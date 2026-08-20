@@ -4,7 +4,6 @@ import {
   View,
   Image,
   ToastAndroid,
-  Alert,
 } from 'react-native';
 import { PlainText } from './PlainText';
 import { SmallText } from './SmallText';
@@ -23,8 +22,7 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import { StorageManager } from '../../Utils/StorageManager';
 import EventRegister from '../../Utils/EventRegister';
 import Octicons from 'react-native-vector-icons/Octicons';
-import { requestStoragePermission } from '../../Utils/PermissionManager';
-import { UnifiedDownloadService } from '../../Utils/UnifiedDownloadService';
+import { downloadSongNow } from '../../hooks/useDownloadSong';
 import { DownloadProgressIndicator } from '../Download/DownloadProgressIndicator';
 
 export const EachSongCard = memo(function EachSongCard({
@@ -725,34 +723,20 @@ export const EachSongCard = memo(function EachSongCard({
     }
 
     try {
-      const permissionGranted = await requestStoragePermission();
-      if (!permissionGranted) {
-        Alert.alert(
-          'Permission Denied',
-          'Storage permission is required to download songs. Please grant it in your device settings.'
-        );
-        return;
-      }
-
       setDownloadInProgress(true);
 
-      const actualSource = item?.source || source || 'saavn';
-      const songData = {
+      // Permission handling and source detection live in the shared helper.
+      const success = await downloadSongNow({
+        ...(item || {}),
         id,
         title,
         artist,
         url,
         image: typeof image === 'string' ? image : image?.uri || safeImageUri,
-        artwork: typeof image === 'string' ? image : image?.uri || safeImageUri,
         duration,
         language,
         artistID,
-        source: actualSource,
-        isDabTrack: item?.isDabTrack || false,
-        downloadUrl: item?.downloadUrl || item?.download_url,
-      };
-
-      const success = await UnifiedDownloadService.downloadSong(songData);
+      });
 
       if (success) {
         setIsDownloaded(true);

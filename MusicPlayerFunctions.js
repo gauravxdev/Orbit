@@ -24,6 +24,10 @@ import FormatArtist from './Utils/FormatArtists';
 import dabRecommendationService from './Utils/DABRecommendationService';
 import lastFMService from './Utils/LastFMService';
 import progressiveQueueLoader from './Utils/ProgressiveQueueLoader';
+import {
+  getQueueLength,
+  invalidateQueueSnapshot,
+} from './Utils/QueueSnapshot';
 
 let isPlayerInitialized = false;
 
@@ -213,9 +217,8 @@ async function PlayOneSong(song) {
         // Use StreamFetchManager for deduplication and abort support
         const streamData = await streamFetchManager.fetchStream(
           song.id,
-          async (videoId, signal) => {
-            return await youtubeStreamingService.getStreamUrl(videoId, false);
-          }
+          async (videoId, signal) =>
+            youtubeStreamingService.getStreamUrl(videoId, false, signal)
         );
 
         if (streamData && streamData.url) {
@@ -503,6 +506,7 @@ async function PlayOneSong(song) {
 
     await TrackPlayer.reset();
     await TrackPlayer.add([songForPlayback]);
+    invalidateQueueSnapshot();
     await TrackPlayer.play();
 
     // NON-BLOCKING: Start history tracking AFTER playback begins
@@ -948,6 +952,7 @@ async function AddPlaylist(songs, startSongId = null) {
     // Start playback IMMEDIATELY with initial batch
     await TrackPlayer.reset();
     await TrackPlayer.add(validInitialSongs);
+    invalidateQueueSnapshot();
     await TrackPlayer.play();
 
     // CRITICAL: Emit queue-updated immediately so Context.Queue syncs
@@ -1253,270 +1258,311 @@ async function SetProgressSong(value) {
   }
 }
 
-async function PlayNextSong() {
-  // INSTANT RESPONSE: Cancel any in-flight prefetches immediately
-  const smartPrefetchManager = require('./Utils/SmartPrefetchManager').default;
-  smartPrefetchManager.cancelAllPrefetches();
+// Max time a manual skip will wait for an un-prefetched stream before giving
+// up and letting the player's error recovery take over. Keeps a cache miss
+// feeling like a short load instead of a dead-air error cycle.
+const SKIP_STREAM_TIMEOUT_MS = 1500;
 
-  // Use SkipOperationManager to debounce and lock skip operations
-  const executed = await skipOperationManager.executeSkip(async (signal) => {
-    try {
-      // Ensure player is initialized
-      if (!isPlayerInitialized) {
-        await setupPlayer();
-      }
+/**
+ * Resolve the stream for a track we are about to skip to.
+ *
+ * Returns true when the queue entry is playable. Historically this fired the
+ * fetch and skipped onto the `ytmusic://` placeholder anyway, which made
+ * ExoPlayer raise a PlaybackError and forced a fetch + queue rebuild + player
+ * restart - about a second of frozen timeline. Resolving first costs one
+ * network round-trip and keeps playback in a valid state throughout.
+ */
+async function resolveTrackForSkip(track, index, signal) {
+  if (!smartPrefetchManager.needsStream(track)) {
+    return true;
+  }
 
-      // NON-BLOCKING: Stop tracking in background
-      historyManager.stopTracking().catch(() => {});
+  // Fast path: already prefetched.
+  const cachedStream = smartPrefetchManager.getPrefetchedStream(track.id);
+  if (cachedStream) {
+    await smartPrefetchManager.replaceTrackAndWait(index, track, cachedStream);
+    return true;
+  }
 
-      // Get current track index ONLY (not full queue - expensive!)
-      const currentTrack = await TrackPlayer.getCurrentTrack();
-      const queueLength = (await TrackPlayer.getQueue()).length;
-      // If there's no next track, just return
-      if (currentTrack >= queueLength - 1) {
-        return;
-      }
+  // Slow path: resolve on demand, but never block the skip indefinitely.
+  try {
+    const streamData = await Promise.race([
+      smartPrefetchManager.fetchOnDemand(track.id, signal),
+      new Promise((resolve) =>
+        setTimeout(() => resolve(null), SKIP_STREAM_TIMEOUT_MS)
+      ),
+    ]);
 
-      const nextTrackIndex = currentTrack + 1;
-      const nextTrack = await TrackPlayer.getTrack(nextTrackIndex);
+    if (signal?.aborted) {
+      throw new Error('AbortError');
+    }
 
-      if (!nextTrack) {
-        return;
-      }
-
-      // Check if next track needs stream
-      const needsStream =
-        nextTrack._needsStream ||
-        nextTrack.url?.startsWith('ytmusic://') ||
-        nextTrack.url?.startsWith('spotify://') ||
-        nextTrack.url?.startsWith('dab://') ||
-        nextTrack.url?.includes('music.youtube.com');
-
-      // 🚀 OPTIMISTIC UI: Emit metadata IMMEDIATELY
-      DeviceEventEmitter.emit('song-loading-started', {
-        id: nextTrack.id,
-        title: nextTrack.title || 'Loading...',
-        artist: nextTrack.artist || 'Loading...',
-        artwork: nextTrack.artwork || nextTrack.image || '',
-        image: nextTrack.artwork || nextTrack.image || '',
-        duration: nextTrack.duration,
-        isLoading: true,
-      });
-
-      // FAST PATH: If stream is cached, replace immediately (fast)
-      // SLOW PATH: Skip immediately and let error handler recover (non-blocking)
-      if (needsStream && !nextTrack._prefetched) {
-        const cachedStream = smartPrefetchManager.getPrefetchedStream(
-          nextTrack.id
-        );
-
-        if (cachedStream) {
-          // This is fast - just update metadata
-          await smartPrefetchManager.replaceTrackAndWait(
-            nextTrackIndex,
-            nextTrack,
-            cachedStream
-          );
-        } else {
-          // 🚀 INSTANT SKIP: Don't wait for stream - skip now, error handler will recover
-          // Start fetch in background for error handler
-          smartPrefetchManager.fetchOnDemand(nextTrack.id).catch(() => {});
-        }
-      }
-
-      // Skip to next track - THIS SHOULD BE INSTANT
-      await TrackPlayer.skipToNext();
-
-      // NON-BLOCKING: Background operations
-      setImmediate(async () => {
-        try {
-          const newTrack = await TrackPlayer.getActiveTrack();
-          if (newTrack) {
-            historyManager.startTracking(newTrack).catch(() => {});
-            skipOperationManager.resetErrorCounter();
-          }
-
-          // Ensure playback starts
-          const state = await TrackPlayer.getState();
-          if (state !== TrackPlayer.STATE_PLAYING) {
-            await TrackPlayer.play();
-          }
-        } catch (e) {}
-      });
-    } catch (error) {
-      if (error.message === 'AbortError') {
-      } else {
-        console.error('❌ Error in PlayNextSong:', error);
-      }
+    if (streamData && streamData.url) {
+      await smartPrefetchManager.replaceTrackAndWait(index, track, streamData);
+      return true;
+    }
+  } catch (error) {
+    if (error.message === 'AbortError') {
       throw error;
     }
-  });
-
-  if (!executed) {
   }
+
+  // Fall through: skip anyway and let the recovery handler deal with it.
+  return false;
+}
+
+// Rapid presses inside this window collapse into a single jump. Previously
+// each button had its own lock that silently swallowed presses during a skip,
+// which is what made the controls feel dead.
+const SKIP_COALESCE_MS = 120;
+
+let pendingSkipTarget = null;
+let skipCoalesceTimer = null;
+let skipWaiters = [];
+// Target of the skip currently executing. Presses that land while a skip is
+// still resolving must accumulate from here, not from the active index, which
+// hasn't moved yet.
+let activeSkipTarget = null;
+
+/** Clamp a target index to something that actually exists in the queue. */
+async function clampToExistingIndex(target) {
+  const candidate = Math.max(0, target);
+
+  // getTrack() resolves null for an out-of-range index (no throw), so this is
+  // a cheap single-track existence check.
+  const direct = await TrackPlayer.getTrack(candidate);
+  if (direct) {
+    return candidate;
+  }
+
+  // Overshot the end of the queue - clamp to the last track. Uses the shared
+  // snapshot so this doesn't become another full queue serialization.
+  const length = await getQueueLength(0);
+  if (!length) {
+    return -1;
+  }
+  return Math.min(candidate, length - 1);
+}
+
+/** Push a track's metadata to the optimistic-UI listeners. */
+function emitTrackLoading(track, isLoading = true) {
+  if (!track) {
+    return;
+  }
+  DeviceEventEmitter.emit('song-loading-started', {
+    id: track.id,
+    title: track.title || 'Loading...',
+    artist: track.artist || 'Loading...',
+    artwork: track.artwork || track.image || '',
+    image: track.artwork || track.image || '',
+    duration: track.duration,
+    isLoading,
+  });
+}
+
+/**
+ * Re-publish the track that is actually playing.
+ * The mini player clears its optimistic "loading" state only when the active
+ * track id matches what it was shown, so a burst that cancels itself out
+ * (next then previous) would otherwise leave it stuck on a song we never
+ * skipped to.
+ */
+async function resetLoadingToActiveTrack() {
+  try {
+    const activeTrack = await TrackPlayer.getActiveTrack();
+    emitTrackLoading(activeTrack, false);
+  } catch (e) {}
+}
+
+function resolveSkipWaiters() {
+  const waiters = skipWaiters;
+  skipWaiters = [];
+  waiters.forEach((resolve) => resolve());
+}
+
+/** Run the coalesced skip to whatever target the burst settled on. */
+async function flushPendingSkip() {
+  skipCoalesceTimer = null;
+
+  const requestedTarget = pendingSkipTarget;
+  pendingSkipTarget = null;
+
+  if (requestedTarget === null || requestedTarget === undefined) {
+    resolveSkipWaiters();
+    return;
+  }
+
+  activeSkipTarget = requestedTarget;
+
+  // Cancel in-flight prefetches so they don't rewrite the queue mid-skip.
+  smartPrefetchManager.cancelAllPrefetches();
+
+  try {
+    await skipOperationManager.executeSkip(async (signal) => {
+      try {
+        if (!isPlayerInitialized) {
+          await setupPlayer();
+        }
+
+        if (signal.aborted) {
+          throw new Error('AbortError');
+        }
+
+        const targetIndex = await clampToExistingIndex(requestedTarget);
+        if (targetIndex === -1) {
+          await resetLoadingToActiveTrack();
+          return;
+        }
+
+        const currentIndex = await TrackPlayer.getActiveTrackIndex();
+        if (targetIndex === currentIndex) {
+          // Burst cancelled itself out (next then previous) - nothing to do.
+          await resetLoadingToActiveTrack();
+          return;
+        }
+
+        const targetTrack = await TrackPlayer.getTrack(targetIndex);
+        if (!targetTrack) {
+          await resetLoadingToActiveTrack();
+          return;
+        }
+
+        // OPTIMISTIC UI: show the destination track's metadata right away.
+        emitTrackLoading(targetTrack);
+
+        // NON-BLOCKING: stop tracking now that we know we really are moving
+        // (bailing out above would otherwise end the current song's history
+        // entry without starting a new one).
+        historyManager.stopTracking().catch(() => {});
+
+        await resolveTrackForSkip(targetTrack, targetIndex, signal);
+
+        if (signal.aborted) {
+          throw new Error('AbortError');
+        }
+
+        // Skip by absolute index: a stream replacement may have shifted the
+        // queue, and skipToNext/skipToPrevious would race with that.
+        await TrackPlayer.skip(targetIndex);
+        await TrackPlayer.play();
+
+        // NON-BLOCKING: background bookkeeping
+        setImmediate(async () => {
+          try {
+            const newTrack = await TrackPlayer.getActiveTrack();
+            if (newTrack) {
+              historyManager.startTracking(newTrack).catch(() => {});
+              skipOperationManager.resetErrorCounter();
+            }
+          } catch (e) {}
+        });
+      } catch (error) {
+        if (error.message === 'AbortError') {
+          return;
+        }
+        console.error('Error performing skip:', error);
+      }
+    }, true);
+  } finally {
+    // Only clear if a newer burst hasn't already claimed the slot.
+    if (activeSkipTarget === requestedTarget) {
+      activeSkipTarget = null;
+    }
+    resolveSkipWaiters();
+  }
+}
+
+/**
+ * Queue a manual skip. Presses accumulate into a single target index, so
+ * tapping next three times jumps three tracks with one stream resolution
+ * instead of three sequential round-trips (or two dropped presses).
+ *
+ * @param {'next'|'previous'} direction
+ */
+async function performSkip(direction) {
+  const delta = direction === 'next' ? 1 : -1;
+
+  let base = pendingSkipTarget;
+  if (base === null || base === undefined) {
+    base = activeSkipTarget;
+  }
+  if (base === null || base === undefined) {
+    const activeIndex = await TrackPlayer.getActiveTrackIndex();
+    if (activeIndex === undefined || activeIndex === null) {
+      return;
+    }
+    base = activeIndex;
+  }
+
+  pendingSkipTarget = Math.max(0, base + delta);
+
+  // Instant feedback for the current best guess (single-track bridge call).
+  try {
+    emitTrackLoading(await TrackPlayer.getTrack(pendingSkipTarget));
+  } catch (e) {}
+
+  return new Promise((resolve) => {
+    skipWaiters.push(resolve);
+
+    if (skipCoalesceTimer) {
+      clearTimeout(skipCoalesceTimer);
+    }
+    skipCoalesceTimer = setTimeout(() => {
+      flushPendingSkip().catch(() => resolveSkipWaiters());
+    }, SKIP_COALESCE_MS);
+  });
+}
+
+async function PlayNextSong() {
+  await performSkip('next');
 }
 
 async function PlayPreviousSong() {
-  // INSTANT RESPONSE: Cancel any in-flight prefetches immediately
-  const smartPrefetchManager = require('./Utils/SmartPrefetchManager').default;
-  smartPrefetchManager.cancelAllPrefetches();
-
-  // Use SkipOperationManager to debounce and lock skip operations
-  const executed = await skipOperationManager.executeSkip(async (signal) => {
-    try {
-      // Ensure player is initialized
-      if (!isPlayerInitialized) {
-        await setupPlayer();
-      }
-
-      // NON-BLOCKING: Stop tracking in background
-      historyManager.stopTracking().catch(() => {});
-
-      // Check if operation was cancelled
-      if (signal.aborted) {
-        throw new Error('AbortError');
-      }
-
-      // Get current track index ONLY (not full queue - expensive!)
-      const currentTrack = await TrackPlayer.getCurrentTrack();
-      // If there's no previous track, just return
-      if (currentTrack <= 0) {
-        return;
-      }
-
-      const prevTrackIndex = currentTrack - 1;
-      const prevTrack = await TrackPlayer.getTrack(prevTrackIndex);
-
-      if (!prevTrack) {
-        return;
-      }
-
-      // Check if previous track needs stream
-      const needsStream =
-        prevTrack._needsStream ||
-        prevTrack.url?.startsWith('ytmusic://') ||
-        prevTrack.url?.startsWith('spotify://') ||
-        prevTrack.url?.startsWith('dab://') ||
-        prevTrack.url?.includes('music.youtube.com');
-
-      // 🚀 OPTIMISTIC UI: Emit metadata IMMEDIATELY
-      DeviceEventEmitter.emit('song-loading-started', {
-        id: prevTrack.id,
-        title: prevTrack.title || 'Loading...',
-        artist: prevTrack.artist || 'Loading...',
-        artwork: prevTrack.artwork || prevTrack.image || '',
-        image: prevTrack.artwork || prevTrack.image || '',
-        duration: prevTrack.duration,
-        isLoading: true,
-      });
-
-      // FAST PATH: If stream is cached, replace immediately (fast)
-      // SLOW PATH: Skip immediately and let error handler recover (non-blocking)
-      if (needsStream && !prevTrack._prefetched) {
-        const cachedStream = smartPrefetchManager.getPrefetchedStream(
-          prevTrack.id
-        );
-
-        if (cachedStream) {
-          // This is fast - just update metadata
-          await smartPrefetchManager.replaceTrackAndWait(
-            prevTrackIndex,
-            prevTrack,
-            cachedStream
-          );
-        } else {
-          // 🚀 INSTANT SKIP: Don't wait for stream - skip now, error handler will recover
-          // Start fetch in background for error handler
-          smartPrefetchManager.fetchOnDemand(prevTrack.id).catch(() => {});
-        }
-      }
-
-      // Skip to previous track - THIS SHOULD BE INSTANT
-      await TrackPlayer.skipToPrevious();
-
-      // NON-BLOCKING: Background operations
-      setImmediate(async () => {
-        try {
-          const newTrack = await TrackPlayer.getActiveTrack();
-          if (newTrack) {
-            historyManager.startTracking(newTrack).catch(() => {});
-            skipOperationManager.resetErrorCounter();
-          }
-
-          // Ensure playback starts
-          const state = await TrackPlayer.getState();
-          if (state !== TrackPlayer.STATE_PLAYING) {
-            await TrackPlayer.play();
-          }
-        } catch (e) {}
-      });
-    } catch (error) {
-      if (error.message === 'AbortError') {
-      } else {
-        console.error('❌ Error in PlayPreviousSong:', error);
-      }
-      throw error;
-    }
-  });
-
-  if (!executed) {
-  }
+  await performSkip('previous');
 }
+
 async function SkipToTrack(trackIndex) {
   try {
-    // Stop tracking current song before switching
-    await historyManager.stopTracking();
+    // NON-BLOCKING: stop tracking in the background
+    historyManager.stopTracking().catch(() => {});
 
     // Ensure trackIndex is a valid number
     const validIndex = Number(trackIndex);
-    if (isNaN(validIndex)) {
+    if (isNaN(validIndex) || validIndex < 0) {
       console.error('Invalid trackIndex provided to SkipToTrack:', trackIndex);
       return;
     }
 
-    // Get the queue to verify index is within bounds
-    const queue = await TrackPlayer.getQueue();
-    if (validIndex < 0 || validIndex >= queue.length) {
-      console.error(
-        'Track index out of bounds:',
-        validIndex,
-        'Queue length:',
-        queue.length
-      );
+    // PERFORMANCE: getTrack() validates bounds without serializing the whole
+    // queue across the bridge.
+    const targetTrack = await TrackPlayer.getTrack(validIndex);
+    if (!targetTrack) {
+      console.error('Track index out of bounds:', validIndex);
       return;
     }
 
-    const targetTrack = queue[validIndex];
+    // OPTIMISTIC UI: show the destination metadata immediately
+    emitTrackLoading(targetTrack);
 
-    // Check if track needs stream (random song selection)
-    const needsStream =
-      targetTrack._needsStream ||
-      targetTrack.url?.startsWith('ytmusic://') ||
-      targetTrack.url?.includes('music.youtube.com');
-
-    if (needsStream && !targetTrack._prefetched) {
-      // FIRST: Check if SmartPrefetchManager has cached stream
+    if (smartPrefetchManager.needsStream(targetTrack)) {
       const cachedStream = smartPrefetchManager.getPrefetchedStream(
         targetTrack.id
       );
 
-      let streamData = cachedStream;
-
-      if (cachedStream) {
-      } else {
-        // Use SmartPrefetchManager for on-demand fetch (with retry)
-        streamData = await smartPrefetchManager.fetchOnDemand(targetTrack.id);
-      }
+      const streamData =
+        cachedStream ||
+        (await smartPrefetchManager.fetchOnDemand(targetTrack.id));
 
       if (streamData && streamData.url) {
-        // Replace track in queue with valid URL using SAFE non-blocking method
         await smartPrefetchManager.replaceTrackAndWait(
           validIndex,
           targetTrack,
           streamData
         );
       } else {
-        console.error('❌ Failed to get stream for random track');
+        console.error('Failed to get stream for selected track');
+        // Don't leave the mini player stuck on a song we never played
+        await resetLoadingToActiveTrack();
         return;
       }
     }

@@ -6,6 +6,7 @@ import {
   useProgress,
   useActiveTrack,
   usePlaybackState,
+  State,
 } from 'react-native-track-player';
 import { SetProgressSong } from '../../MusicPlayerFunctions';
 import TrackPlayer from 'react-native-track-player';
@@ -101,7 +102,10 @@ const ProgressBar = () => {
               setSliderValue(value);
             }}
             onSlidingStart={() => {
-              setWasPlaying(playbackState === TrackPlayer.STATE_PLAYING);
+              // TrackPlayer.STATE_PLAYING was removed in RNTP v4 - it read as
+              // undefined here, so wasPlaying was always false and playback
+              // never resumed automatically after a seek.
+              setWasPlaying(playbackState?.state === State.Playing);
               setIsSliding(true);
             }}
             onSlidingComplete={async (value) => {

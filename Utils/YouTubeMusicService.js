@@ -1,5 +1,6 @@
 import InnerTubeClient from '../Api/InnertubeClient';
 import NativeStreaming from './NativeStreaming';
+import youtubeStreamingService from './YouTubeStreamingService';
 import { GetYtMusicQuality } from '../LocalStorage/AppSettings';
 
 // Cache quality preference to avoid repeated AsyncStorage calls
@@ -35,11 +36,16 @@ class YouTubeMusicService {
       // Auto = true (use first stream), High = false (select best quality)
       autoQuality = cachedQualityPref !== 'High';
 
-      const stream = await NativeStreaming.getStreamUrl(
-        videoId,
-        '',
-        autoQuality
-      );
+      // Delegate to the shared streaming service so Spotify-mapped tracks get
+      // the same InnerTube resolution, stream cache and - critically - the
+      // matching User-Agent headers as native YTMusic tracks. Playing a
+      // googlevideo URL without the UA it was issued to returns 403.
+      let stream = await youtubeStreamingService.getStreamUrl(videoId);
+
+      // Fallback to the native resolver only if the shared path came back empty
+      if (!stream || !stream.url) {
+        stream = await NativeStreaming.getStreamUrl(videoId, '', autoQuality);
+      }
 
       // CRITICAL: Validate that we got a valid stream URL
       if (!stream || !stream.url) {
@@ -149,7 +155,15 @@ class YouTubeMusicService {
 
         return {
           ...stream,
-          ...results[0], // Merge metadata
+          ...results[0], // Merge metadata (unchanged precedence)
+          // ...but the playback fields must always come from the resolved
+          // stream, never from the search result.
+          url: stream.url,
+          headers: stream.headers,
+          userAgent: stream.userAgent,
+          format: stream.format,
+          mimeType: stream.mimeType,
+          bitrate: stream.bitrate,
           videoId: videoId,
           stream_url: stream.url, // legacy key
         };

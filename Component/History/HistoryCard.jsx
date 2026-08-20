@@ -22,7 +22,7 @@ import MaterialIcons from 'react-native-vector-icons/MaterialIcons';
 import Context from '../../Context/Context';
 import { PlayOneSong } from '../../MusicPlayerFunctions';
 import { StorageManager } from '../../Utils/StorageManager';
-import { UnifiedDownloadService } from '../../Utils/UnifiedDownloadService';
+import { downloadSongNow } from '../../hooks/useDownloadSong';
 import { AddOneSongToPlaylist } from '../../MusicPlayerFunctions';
 import historyManager from '../../Utils/HistoryManager';
 import { GlassBox } from '../Global/GlassBox';
@@ -266,23 +266,15 @@ export const HistoryCard = memo(function HistoryCard({
       setDownloadProgress(0);
       setMenuVisible(false);
 
-      // Use the unified download service
-      const success = await UnifiedDownloadService.downloadSong(
-        {
-          ...historyItem,
-          source: historyItem.source || 'saavn',
-        },
-        (progress) => {
-          setDownloadProgress(progress);
-        }
-      );
+      // Shared helper detects the real source instead of assuming Saavn, and
+      // reports its own success/failure toast.
+      const success = await downloadSongNow(historyItem, (progress) => {
+        setDownloadProgress(progress);
+      });
 
       if (success) {
         setIsDownloaded(true);
         setDownloadProgress(100);
-        ToastAndroid.show('Download completed', ToastAndroid.SHORT);
-      } else {
-        ToastAndroid.show('Download failed', ToastAndroid.SHORT);
       }
     } catch (error) {
       console.error('Download failed:', error);

@@ -22,26 +22,62 @@ await TrackPlayer.setupPlayer({
       isPlayerInitialized = true;
     }
 
-    // CRITICAL: Use simple native TrackPlayer methods for remote events
-    // Complex functions like PlayNextSong/PlayPreviousSong fail in background
-    // because they depend on React Native JS bundle being fully active.
-    // Native skipToNext/skipToPrevious work reliably from notification panel.
+    // CRITICAL: remote events stay on native TrackPlayer methods. The UI-side
+    // PlayNextSong/PlayPreviousSong depend on the React tree being active and
+    // are unreliable from the notification panel.
     TrackPlayer.addEventListener(Event.RemotePlay, () => TrackPlayer.play());
     TrackPlayer.addEventListener(Event.RemotePause, () => TrackPlayer.pause());
-    TrackPlayer.addEventListener(Event.RemoteNext, async () => {
+    // Resolve the destination's stream before skipping, so the notification
+    // controls don't land on a `ytmusic://` placeholder and trigger the
+    // error-recovery cycle. Falls back to a plain native skip on any failure,
+    // which keeps background behaviour as reliable as before.
+    const resolveNeighbourThenSkip = async (offset) => {
       try {
-        await TrackPlayer.skipToNext();
+        const activeIndex = await TrackPlayer.getActiveTrackIndex();
+        if (activeIndex !== undefined && activeIndex !== null) {
+          const targetIndex = activeIndex + offset;
+          if (targetIndex >= 0) {
+            const target = await TrackPlayer.getTrack(targetIndex);
+            if (target && smartPrefetchManager.needsStream(target)) {
+              const streamData =
+                smartPrefetchManager.getPrefetchedStream(target.id) ||
+                (await smartPrefetchManager.fetchOnDemand(
+                  target.id,
+                  null,
+                  target
+                ));
+              if (streamData && streamData.url) {
+                await smartPrefetchManager.replaceTrackAndWait(
+                  targetIndex,
+                  target,
+                  streamData
+                );
+              }
+            }
+          }
+        }
       } catch (e) {
-        // Silently fail if at end of queue
+        // Fall through to the plain skip below
       }
-    });
-    TrackPlayer.addEventListener(Event.RemotePrevious, async () => {
+
       try {
-        await TrackPlayer.skipToPrevious();
+        if (offset > 0) {
+          await TrackPlayer.skipToNext();
+        } else {
+          await TrackPlayer.skipToPrevious();
+        }
+        await TrackPlayer.play();
       } catch (e) {
-        // Silently fail if at start of queue
+        // Silently fail at the ends of the queue
       }
-    });
+    };
+
+    TrackPlayer.addEventListener(Event.RemoteNext, () =>
+      resolveNeighbourThenSkip(1)
+    );
+    TrackPlayer.addEventListener(Event.RemotePrevious, () =>
+      resolveNeighbourThenSkip(-1)
+    );
     TrackPlayer.addEventListener(Event.RemoteSeek, (e) =>
       TrackPlayer.seekTo(e.position)
     );

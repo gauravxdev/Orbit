@@ -15,7 +15,7 @@ import Ionicons from 'react-native-vector-icons/Ionicons';
 import FormatArtist from '../../Utils/FormatArtists';
 import FormatTitleAndArtist from '../../Utils/FormatTitleAndArtist';
 import { CacheManager } from '../../Utils/CacheManager';
-import TrackPlayer from 'react-native-track-player';
+import TrackPlayer, { useActiveTrack } from 'react-native-track-player';
 import { DownloadButton } from '../Global/DownloadButton';
 import { requestWithFallback } from '../../Api/apiUtils';
 
@@ -125,7 +125,8 @@ export const PlaylistDetails = ({
   follower = '',
   playlistId = '',
 }) => {
-  const { updateTrack, currentPlaying } = useContext(Context);
+  const { updateTrack } = useContext(Context);
+  const currentPlaying = useActiveTrack();
   const [isPlaying, setIsPlaying] = useState(false);
   const [loading, setLoading] = useState(Loading);
   const { theme } = useThemeContext();

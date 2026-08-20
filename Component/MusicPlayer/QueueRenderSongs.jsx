@@ -15,7 +15,11 @@ import {
 } from 'react-native';
 import { EachSongQueue } from './EachSongQueue';
 import { BottomSheetFlatList } from '@gorhom/bottom-sheet';
-import Context from '../../Context/Context';
+import QueueContext from '../../Context/QueueContext';
+import {
+  getQueueSnapshot,
+  invalidateQueueSnapshot,
+} from '../../Utils/QueueSnapshot';
 import {
   useActiveTrack,
   usePlaybackState,
@@ -34,7 +38,7 @@ import { StorageManager } from '../../Utils/StorageManager';
 import { useThemeContext } from '../../Context/ThemeContext';
 import { debounce, deduplicateEventHandler } from '../../Utils/EventDebouncer';
 import EventRegister from '../../Utils/EventRegister';
-import { UnifiedDownloadService } from '../../Utils/UnifiedDownloadService';
+import { downloadSongNow } from '../../hooks/useDownloadSong';
 import { InteractionManager } from 'react-native';
 
 // Function to get high quality artwork URL
@@ -82,7 +86,7 @@ const getHighQualityArtwork = (artworkUrl) => {
 
 const QueueRenderSongs = memo(({ reorderMode = false }) => {
   // Context and state
-  const { Queue } = useContext(Context);
+  const { Queue } = useContext(QueueContext);
   const { theme, themeMode } = useThemeContext();
   const currentPlaying = useActiveTrack();
   const playerState = usePlaybackState(); // Call ONCE here instead of in every queue item
@@ -159,16 +163,12 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
       return;
     }
 
-    // Defer heavy download operation to prevent UI blocking
+    // Defer heavy download operation to prevent UI blocking.
+    // downloadSongNow already broadcasts 'download-progress', which the
+    // listener above folds into downloadStates - no local emit needed.
     InteractionManager.runAfterInteractions(async () => {
       try {
-        await UnifiedDownloadService.downloadSong(songData, (progress) => {
-          // Emit progress event for state update
-          EventRegister.emit('download-progress', {
-            songId: songData.id,
-            progress,
-          });
-        });
+        await downloadSongNow(songData);
       } catch (error) {
         console.error('Download error from QueueRenderSongs:', error.message);
         setDownloadStates((prev) => ({
@@ -288,9 +288,17 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
           return [];
         }
 
-        // Always get downloaded tracks to have ready (regardless of offline status)
-        // Cache used internally by getDownloadedTracks
-        const downloadedTracks = await getDownloadedTracks();
+        // PERFORMANCE: resolved lazily. getDownloadedTracks() reads the
+        // downloads metadata and resolves an artwork + song path per
+        // downloaded song. Running it eagerly put that I/O on every track
+        // change - including online playback, which never uses the result.
+        let downloadedTracksPromise = null;
+        const downloadedTracksLazy = () => {
+          if (!downloadedTracksPromise) {
+            downloadedTracksPromise = getDownloadedTracks();
+          }
+          return downloadedTracksPromise;
+        };
 
         // Check if the current track has a sourceType (mymusic or download)
         const sourceType = (
@@ -316,7 +324,7 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
               fullQueue = trackPlayerQueueCache.current;
             } else {
               try {
-                fullQueue = await TrackPlayer.getQueue();
+                fullQueue = await getQueueSnapshot(QUEUE_CACHE_TTL);
                 trackPlayerQueueCache.current = fullQueue;
                 trackPlayerQueueCacheTime.current = now;
               } catch (e) {}
@@ -365,7 +373,7 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
               fullQueue = trackPlayerQueueCache.current;
             } else {
               try {
-                fullQueue = await TrackPlayer.getQueue();
+                fullQueue = await getQueueSnapshot(QUEUE_CACHE_TTL);
                 trackPlayerQueueCache.current = fullQueue;
                 trackPlayerQueueCacheTime.current = now;
               } catch (e) {}
@@ -387,6 +395,7 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
             downloadSourceTracks.length > 0 ? downloadSourceTracks : [];
 
           // Add any downloaded tracks not already in the queue
+          const downloadedTracks = await downloadedTracksLazy();
           if (downloadedTracks.length > 0) {
             const existingIds = new Set(combinedTracks.map((t) => t.id));
             const additionalDownloads = downloadedTracks.filter(
@@ -437,7 +446,7 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
             } else {
               // Cache is stale or empty - fetch fresh queue from TrackPlayer
               try {
-                fullQueue = await TrackPlayer.getQueue();
+                fullQueue = await getQueueSnapshot(QUEUE_CACHE_TTL);
                 // Cache the result
                 trackPlayerQueueCache.current = fullQueue;
                 trackPlayerQueueCacheTime.current = now;
@@ -486,6 +495,7 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
           // In offline mode, if current track is not local/downloaded or from MyMusic,
           // default to showing downloaded songs as fallback
           // If we have downloaded tracks, show them
+          const downloadedTracks = await downloadedTracksLazy();
           if (downloadedTracks.length > 0) {
             return [
               currentTrack,
@@ -786,6 +796,7 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
 
       // Remove the track from the actual player queue
       await TrackPlayer.remove(actualIndex);
+      invalidateQueueSnapshot();
       // CRITICAL: Update the visual queue state immediately
       // This ensures the UI reflects the removal even before any events trigger
       setUpcomingQueue((prev) => prev.filter((t) => t.id !== trackId));
@@ -884,11 +895,13 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
 
               if (queue.length > 0 && shouldKeepQueue) {
                 await TrackPlayer.add([trackToAdd], 0); // Add at beginning
+                invalidateQueueSnapshot();
                 await TrackPlayer.skip(0); // Skip to our new track
               } else {
                 // Reset the queue if the source types are different
                 await TrackPlayer.reset();
                 await TrackPlayer.add([trackToAdd]);
+                invalidateQueueSnapshot();
               }
               await TrackPlayer.play();
               setIsPendingAction(false);
@@ -945,6 +958,7 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
 
             await TrackPlayer.reset();
             await TrackPlayer.add([trackToAdd]);
+            invalidateQueueSnapshot();
             await TrackPlayer.play();
             setIsPendingAction(false);
             operationInProgressRef.current = false;
@@ -1151,6 +1165,7 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
 
           // Step 3: Add the track at the calculated position
           await TrackPlayer.add(trackToMove, insertIndex);
+          invalidateQueueSnapshot();
           // Small delay to let TrackPlayer queue settle
           await new Promise((resolve) => setTimeout(resolve, 150));
 
@@ -1284,7 +1299,7 @@ const QueueRenderSongs = memo(({ reorderMode = false }) => {
         if (currentTrack) {
           // CRITICAL FIX: Fetch fresh queue directly from TrackPlayer
           // Context.Queue might be stale due to React state batching when this event fires
-          const freshQueue = await TrackPlayer.getQueue();
+          const freshQueue = await getQueueSnapshot(0);
           // Update cache since we just fetched fresh data
           trackPlayerQueueCache.current = freshQueue;
           trackPlayerQueueCacheTime.current = Date.now();

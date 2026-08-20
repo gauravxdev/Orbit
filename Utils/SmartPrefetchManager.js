@@ -16,6 +16,10 @@
 
 import TrackPlayer, { Event, State } from 'react-native-track-player';
 import youtubeStreamingService from './YouTubeStreamingService';
+import {
+  getQueueSnapshot,
+  invalidateQueueSnapshot,
+} from './QueueSnapshot';
 import { InteractionManager, DeviceEventEmitter } from 'react-native';
 
 // Constants for configuration
@@ -50,13 +54,30 @@ class SmartPrefetchManager {
   }
 
   /**
+   * Signal shared by all in-flight prefetches, so a skip can actually cancel
+   * them. Previously `prefetchAbortController` was never assigned and no fetch
+   * received a signal, so "cancelled" prefetches kept running and rewrote the
+   * queue mid-skip.
+   */
+  _getPrefetchSignal() {
+    if (!this.prefetchAbortController) {
+      this.prefetchAbortController = new AbortController();
+    }
+    return this.prefetchAbortController.signal;
+  }
+
+  /**
    * Cancel all pending prefetch operations (called when user skips)
    */
   cancelAllPrefetches() {
+    this._cancelPendingPrefetch();
+
     if (this.prefetchAbortController) {
       this.prefetchAbortController.abort();
       this.prefetchAbortController = null;
     }
+    // The aborted fetches clear their own entries in their finally blocks, but
+    // clear eagerly so a fresh prefetch for the same id isn't blocked.
     this.prefetchInProgress.clear();
   }
 
@@ -336,16 +357,11 @@ class SmartPrefetchManager {
       // 🚀 PARALLEL PREFETCH for Spotify: N+1 and N+2 simultaneously
       // This reduces total prefetch time from ~4s to ~2s (2 network calls per track)
       Promise.all([
-        this._prefetchTrackAtIndex(currentIdx + 1).catch((e) =>
-          e.message?.includes("doesn't exist")
-            ? null
-            : null
-        ),
-        this._prefetchTrackAtIndex(currentIdx + 2).catch((e) =>
-          e.message?.includes("doesn't exist")
-            ? null
-            : null
-        ),
+        this._prefetchTrackAtIndex(currentIdx + 1).catch(() => null),
+        this._prefetchTrackAtIndex(currentIdx + 2).catch(() => null),
+        currentIdx > 0
+          ? this._prefetchTrackAtIndex(currentIdx - 1).catch(() => null)
+          : Promise.resolve(null),
       ]).then(() => {
         // Parallel prefetch complete
       });
@@ -355,14 +371,18 @@ class SmartPrefetchManager {
       try {
         await this._prefetchNextFromCurrent();
 
-        // Only after N+1 completes, start N+2 (non-blocking)
-        // Use setImmediate to ensure UI thread is not blocked
+        // Only after N+1 completes, start N+2 and N-1 (non-blocking).
+        // N-1 matters: nothing used to prefetch backwards, so pressing
+        // previous on a YTMusic queue always paid a full resolve.
         setImmediate(async () => {
           try {
             // Get FRESH current index - queue may have been rearranged
             const freshIdx = await TrackPlayer.getActiveTrackIndex();
             if (freshIdx !== null && freshIdx !== undefined) {
               await this._prefetchTrackAtIndex(freshIdx + 2);
+              if (freshIdx > 0) {
+                await this._prefetchTrackAtIndex(freshIdx - 1);
+              }
             }
           } catch (err) {
             // Silence expected errors
@@ -390,8 +410,19 @@ class SmartPrefetchManager {
    * This is the key fix - when TrackPlayer fails on placeholder URL,
    * we fetch on-demand and retry playback
    */
-  async _handlePlaybackError(_event) {
+  async _handlePlaybackError(event) {
     const now = Date.now();
+
+    // DIAGNOSTICS: the event carries the real reason. Without this every
+    // failure looked identical in the logs, whether it was a 403 from
+    // googlevideo (missing PO token), a network drop, or a codec problem.
+    const errCode = event?.code || 'unknown';
+    const errMessage = event?.message || '';
+    console.log(
+      `PlaybackError [${errCode}] ${errMessage} (consecutive: ${
+        this.consecutiveErrors + 1
+      })`
+    );
 
     // Circuit Breaker Reset (if error was long ago)
     if (now - this.lastErrorTimestamp > 5000) {
@@ -401,7 +432,12 @@ class SmartPrefetchManager {
     this.lastErrorTimestamp = now;
     this.consecutiveErrors++;
 
-    console.log(`🔴 PlaybackError detected (Count: ${this.consecutiveErrors})`);
+    // A 403/401 from googlevideo means the URL itself was rejected - the
+    // resolver that produced it can't be trusted for the retry.
+    const isHttpRejection =
+      /bad-http-status|403|401|Forbidden|Unauthorized/i.test(
+        `${errCode} ${errMessage}`
+      );
 
     // STOP if looping too fast (Max 3 retries in 5 seconds)
     if (this.consecutiveErrors > 3) {
@@ -422,10 +458,25 @@ class SmartPrefetchManager {
         return;
       }
 
+      // Which resolver produced the URL that just failed? Retry with the other
+      // one - re-running the same resolver just returns the same dead link.
+      const retryOptions = isHttpRejection
+        ? {
+            forceRefresh: true,
+            preferStrategy:
+              currentTrack._resolvedBy === 'native' ? 'innertube' : 'native',
+          }
+        : {};
+
       // Check if track needs stream (has placeholder URL)
       if (this.needsStream(currentTrack)) {
-        // Fetch stream on-demand
-        const streamData = await this.fetchOnDemand(currentTrack.id);
+        // Fetch stream on-demand - pass the track so we skip a queue scan
+        const streamData = await this.fetchOnDemand(
+          currentTrack.id,
+          null,
+          currentTrack,
+          retryOptions
+        );
 
         if (streamData && streamData.url) {
           // Replace current track with valid URL using ID-based lookup
@@ -435,6 +486,30 @@ class SmartPrefetchManager {
           // Failed to get stream - skip to next
           await this._skipToNextValidTrackById(currentTrack.id);
         }
+      } else if (this.isStreamingSource(currentTrack)) {
+        // URL looked valid but playback still failed (expired CDN URL is the
+        // usual cause). Drop the stale cache entries - both ours and the
+        // shared stream cache, otherwise the re-resolve just hands back the
+        // same dead URL. Guarded to streaming sources so local/downloaded
+        // files are never sent through a network resolver.
+        this.prefetchedTracks.delete(currentTrack.id);
+        try {
+          const { CacheManager } = require('./NavigationCacheManager');
+          CacheManager.invalidateStreamUrl(
+            currentTrack.id,
+            currentTrack.source === 'dab' ? 'dab' : 'ytmusic'
+          );
+        } catch (e) {}
+        const streamData = await this.fetchOnDemand(
+          currentTrack.id,
+          null,
+          currentTrack,
+          { forceRefresh: true, ...retryOptions }
+        );
+        if (streamData && streamData.url) {
+          await this._replaceAndPlayTrackById(currentTrack, streamData);
+          this.consecutiveErrors = 0;
+        }
       }
     } catch (error) {
       console.error('❌ Error in playback error handler:', error.message);
@@ -442,7 +517,7 @@ class SmartPrefetchManager {
       // Release recovery lock after a delay to let queue stabilize
       setTimeout(() => {
         this.isRecovering = false;
-      }, 500);
+      }, 250);
     }
   }
 
@@ -465,23 +540,16 @@ class SmartPrefetchManager {
     let trackId = null; // Track ID for cleanup in finally block
 
     try {
-      let track = await TrackPlayer.getTrack(index);
-      let usingOptimizedMethod = true;
+      if (index < 0) {
+        return;
+      }
 
-      // FALLBACK: If optimized check fails, try full queue fetch
-      // This ensures robustness even if getTrack(index) is unreliable
+      // PERFORMANCE: getTrack() is authoritative here. The old getQueue()
+      // fallback serialized the entire queue over the bridge just to discover
+      // the index didn't exist yet - the common case during lazy loading.
+      const track = await TrackPlayer.getTrack(index);
       if (!track) {
-        const queue = await TrackPlayer.getQueue();
-        if (index >= 0 && index < queue.length) {
-          track = queue[index];
-          // usingOptimizedMethod = false;
-          console.log(
-            `✅ Track found via fallback queue fetch: ${track.title}`
-          );
-        } else {
-          // Reduced noise: Track doesn't exist yet, this is common during lazy loading
-          return;
-        }
+        return;
       }
 
       trackId = track.id; // Capture ID for finally block
@@ -565,7 +633,11 @@ class SmartPrefetchManager {
       }
       // YTMUSIC HANDLING: Standard YouTube stream fetch
       else {
-        streamData = await youtubeStreamingService.getStreamUrl(track.id);
+        streamData = await youtubeStreamingService.getStreamUrl(
+          track.id,
+          false,
+          this._getPrefetchSignal()
+        );
       }
 
       if (streamData && streamData.url) {
@@ -587,16 +659,13 @@ class SmartPrefetchManager {
               return;
             }
 
-            // Fallback: Queue might have shifted, search by ID (heavy operation)
-            const currentQueue = await TrackPlayer.getQueue();
-            const currentIndex = currentQueue.findIndex(
-              (t) => t.id === track.id
-            );
-            if (
-              currentIndex !== -1 &&
-              this.needsStream(currentQueue[currentIndex])
-            ) {
-              await this._replaceTrackInQueue(currentIndex, track, streamData);
+            // Fallback: queue may have shifted - locate by ID
+            const currentIndex = await this._findTrackIndexById(track.id);
+            if (currentIndex !== -1) {
+              const shifted = await TrackPlayer.getTrack(currentIndex);
+              if (shifted && this.needsStream(shifted)) {
+                await this._replaceTrackInQueue(currentIndex, track, streamData);
+              }
             }
           } catch (e) {
             // Queue replacement failed
@@ -604,7 +673,10 @@ class SmartPrefetchManager {
         });
       }
     } catch (error) {
-      console.error(`❌ Prefetch failed for index ${index}:`, error.message);
+      // Aborts are expected whenever the user skips - not worth logging.
+      if (error.name !== 'AbortError' && error.message !== 'AbortError') {
+        console.error(`Prefetch failed for index ${index}:`, error.message);
+      }
     } finally {
       // Clean up in-progress set only if trackId was set
       if (trackId) {
@@ -626,35 +698,69 @@ class SmartPrefetchManager {
       // PERFORMANCE: Optimistic check - try TrackPlayer.getTrack(index) first
       // This avoids serializing the entire queue (O(N)) over the bridge
       let actualIndex = index;
-      const trackAtIndex = await TrackPlayer.getTrack(index);
+      let trackAtIndex = await TrackPlayer.getTrack(index);
 
       // Check if track at index matches our ID
-      if (trackAtIndex && trackAtIndex.id === originalTrack.id) {
-        // Matches! Proceed with optimized path
-      } else {
-        const queue = await TrackPlayer.getQueue();
-        actualIndex = queue.findIndex((t) => t.id === originalTrack.id);
-
-        if (actualIndex === -1) {
-          console.log(
-            `⚠️ Track ${originalTrack.id} no longer in queue, skipping replacement`
-          );
+      if (!trackAtIndex || trackAtIndex.id !== originalTrack.id) {
+        const resolved = await this._findTrackIndexById(originalTrack.id);
+        if (resolved === -1) {
           return;
         }
+        actualIndex = resolved;
+        trackAtIndex = await TrackPlayer.getTrack(actualIndex);
       }
 
       // Skip if already has valid URL (already replaced)
-      if (!this.needsStream(trackAtIndex)) {
+      if (!trackAtIndex || !this.needsStream(trackAtIndex)) {
+        return;
+      }
+
+      // SAFETY: never rewrite the entry that is currently playing here -
+      // removing the active item restarts playback. Error recovery owns that
+      // case via _replaceAndPlayTrackById().
+      const activeIndex = await TrackPlayer.getActiveTrackIndex();
+      if (activeIndex === actualIndex) {
         return;
       }
 
       const updatedTrack = this._createUpdatedTrack(originalTrack, streamData);
 
-      // Remove old track and insert new one at ACTUAL index (found by ID)
-      await TrackPlayer.remove(actualIndex);
+      // Insert the resolved copy first, then drop the placeholder. Doing it in
+      // this order means the queue is never missing the entry, so a concurrent
+      // skip can't land on a hole.
       await TrackPlayer.add(updatedTrack, actualIndex);
+      await TrackPlayer.remove(actualIndex + 1);
+      invalidateQueueSnapshot();
     } catch (error) {
       console.error('Error replacing track:', error.message);
+    }
+  }
+
+  /**
+   * Find a queue index by track id without serializing the whole queue.
+   * Scans the window around the active track first (where skips happen), and
+   * only falls back to a full getQueue() if that misses.
+   */
+  async _findTrackIndexById(trackId) {
+    try {
+      const activeIndex = await TrackPlayer.getActiveTrackIndex();
+      if (activeIndex !== undefined && activeIndex !== null) {
+        for (const offset of [0, 1, -1, 2, -2, 3, -3]) {
+          const idx = activeIndex + offset;
+          if (idx < 0) {
+            continue;
+          }
+          const candidate = await TrackPlayer.getTrack(idx);
+          if (candidate && candidate.id === trackId) {
+            return idx;
+          }
+        }
+      }
+
+      const queue = await getQueueSnapshot();
+      return queue.findIndex((t) => t.id === trackId);
+    } catch (e) {
+      return -1;
     }
   }
 
@@ -684,10 +790,8 @@ class SmartPrefetchManager {
    */
   async _replaceAndPlayTrackById(originalTrack, streamData) {
     try {
-      const queue = await TrackPlayer.getQueue();
-
       // Find track by ID - this is stable even if queue indices shift
-      const currentIndex = queue.findIndex((t) => t.id === originalTrack.id);
+      const currentIndex = await this._findTrackIndexById(originalTrack.id);
 
       if (currentIndex === -1) {
         console.warn('⚠️ Track no longer in queue:', originalTrack.id);
@@ -701,6 +805,7 @@ class SmartPrefetchManager {
       // Remove old track and insert new one at same position
       await TrackPlayer.remove(currentIndex);
       await TrackPlayer.add(updatedTrack, currentIndex);
+      invalidateQueueSnapshot();
 
       // Skip to it and play
       await TrackPlayer.skip(currentIndex);
@@ -723,9 +828,9 @@ class SmartPrefetchManager {
   async _skipToNextValidTrack(failedIndex) {
     // Find track ID at that index first
     try {
-      const queue = await TrackPlayer.getQueue();
-      if (queue[failedIndex]) {
-        await this._skipToNextValidTrackById(queue[failedIndex].id);
+      const failedTrack = await TrackPlayer.getTrack(failedIndex);
+      if (failedTrack) {
+        await this._skipToNextValidTrackById(failedTrack.id);
       }
     } catch (e) {
       console.error('Error in legacy skipToNextValidTrack:', e.message);
@@ -736,14 +841,9 @@ class SmartPrefetchManager {
    * Skip to next valid track when current one fails completely (ID-based)
    */
   async _skipToNextValidTrackById(failedTrackId) {
-    // Short delay to prevent CPU spike
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
     try {
-      const queue = await TrackPlayer.getQueue();
-
       // Find the failed track by ID
-      const failedIndex = queue.findIndex((t) => t.id === failedTrackId);
+      const failedIndex = await this._findTrackIndexById(failedTrackId);
 
       if (failedIndex === -1) {
         // Track already removed - just try to play current
@@ -753,9 +853,10 @@ class SmartPrefetchManager {
 
       // Remove the failed track
       await TrackPlayer.remove(failedIndex);
+      invalidateQueueSnapshot();
 
       // Get new queue state
-      const newQueue = await TrackPlayer.getQueue();
+      const newQueue = await getQueueSnapshot(0);
 
       if (newQueue.length === 0) {
         await TrackPlayer.stop();
@@ -768,7 +869,11 @@ class SmartPrefetchManager {
 
       if (nextTrack && this.needsStream(nextTrack)) {
         // Fetch stream on-demand for next track
-        const streamData = await this.fetchOnDemand(nextTrack.id);
+        const streamData = await this.fetchOnDemand(
+          nextTrack.id,
+          null,
+          nextTrack
+        );
         if (streamData && streamData.url) {
           await this._replaceAndPlayTrackById(nextTrack, streamData);
           return;
@@ -802,6 +907,9 @@ class SmartPrefetchManager {
       userAgent: streamData.headers?.['User-Agent'],
       _needsStream: false,
       _prefetched: true,
+      // Remember which resolver produced this URL so error recovery can
+      // fail over to the other one instead of retrying the same path.
+      _resolvedBy: streamData.resolvedBy || originalTrack._resolvedBy || null,
       // Store videoId for history tracking (enables playback from history)
       videoId: streamData.videoId || originalTrack.videoId,
       // Track if this was mapped from Spotify (for history)
@@ -811,6 +919,38 @@ class SmartPrefetchManager {
         originalTrack.spotifyId ||
         (originalTrack.source === 'spotify' ? originalTrack.id : null),
     };
+  }
+
+  /**
+   * True when a track's audio comes from a remote resolver (YTMusic / Spotify
+   * mapping / DAB) rather than a local file or a direct CDN url.
+   */
+  isStreamingSource(track) {
+    if (!track) {
+      return false;
+    }
+
+    const isLocal =
+      track.isLocalMusic ||
+      track.isDownloaded ||
+      track.sourceType === 'download' ||
+      track.sourceType === 'mymusic' ||
+      (track.url &&
+        (track.url.startsWith('file://') || track.url.includes('/storage/')));
+
+    if (isLocal || track.source === 'saavn') {
+      return false;
+    }
+
+    return (
+      track.source === 'ytmusic' ||
+      track.source === 'spotify' ||
+      track.source === 'dab' ||
+      track.isYTMusic === true ||
+      track.isDabTrack === true ||
+      !!track.spotifyId ||
+      (typeof track.id === 'string' && track.id.length === 11)
+    );
   }
 
   /**
@@ -912,6 +1052,7 @@ class SmartPrefetchManager {
 
       if (removeIndices.length > 0) {
         await TrackPlayer.remove(removeIndices);
+        invalidateQueueSnapshot();
 
         // Update current track index after removal
         this.currentTrackIndex = 5; // After cleanup, current is always at index 5
@@ -962,24 +1103,53 @@ class SmartPrefetchManager {
    * On-demand fetch for random song selection (with retry)
    * Handles Spotify (maps to YTMusic) and DAB tracks
    */
-  async fetchOnDemand(trackId) {
-    // Check prefetch cache first
-    const cached = this.getPrefetchedStream(trackId);
-    if (cached) {
-      return cached;
+  async fetchOnDemand(trackId, signal = null, knownTrack = null, options = {}) {
+    // Check prefetch cache first - unless the caller is explicitly retrying
+    // after a failure, in which case the cached entry is the bad one.
+    if (!options.forceRefresh) {
+      const cached = this.getPrefetchedStream(trackId);
+      if (cached) {
+        return cached;
+      }
+    } else {
+      this.prefetchedTracks.delete(trackId);
     }
 
-    // Get track info from queue to determine source
-    let track = null;
-    try {
-      const queue = await TrackPlayer.getQueue();
-      track = queue.find((t) => t.id === trackId);
-    } catch (e) {
-      // ignore
+    // Determine the source. PERFORMANCE: prefer a track handed to us by the
+    // caller - looking it up used to call getQueue(), serializing the entire
+    // queue over the bridge on every on-demand fetch.
+    let track = knownTrack;
+    if (!track) {
+      try {
+        const activeTrack = await TrackPlayer.getActiveTrack();
+        if (activeTrack && activeTrack.id === trackId) {
+          track = activeTrack;
+        } else {
+          const activeIndex = await TrackPlayer.getActiveTrackIndex();
+          if (activeIndex !== undefined && activeIndex !== null) {
+            // Manual skips only ever target immediate neighbours.
+            for (const offset of [1, -1, 2, -2]) {
+              const candidate = await TrackPlayer.getTrack(
+                activeIndex + offset
+              );
+              if (candidate && candidate.id === trackId) {
+                track = candidate;
+                break;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // ignore - we fall back to the YTMusic path below
+      }
     }
 
     // Fetch with retry
     for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+      if (signal?.aborted) {
+        throw new Error('AbortError');
+      }
+
       try {
         let streamData = null;
 
@@ -1027,7 +1197,12 @@ class SmartPrefetchManager {
         }
         // YTMUSIC HANDLING: Standard YouTube stream fetch
         else {
-          streamData = await youtubeStreamingService.getStreamUrl(trackId);
+          streamData = await youtubeStreamingService.getStreamUrl(
+            trackId,
+            false,
+            signal,
+            options
+          );
         }
 
         if (streamData && streamData.url) {
@@ -1036,7 +1211,11 @@ class SmartPrefetchManager {
           return streamData;
         }
       } catch (error) {
-        console.warn(`⚠️ Attempt ${attempt} failed:`, error.message);
+        if (error.name === 'AbortError' || error.message === 'AbortError') {
+          throw error;
+        }
+
+        console.warn(`On-demand attempt ${attempt} failed:`, error.message);
 
         if (attempt < MAX_RETRY_ATTEMPTS) {
           // Wait before retry
@@ -1046,7 +1225,7 @@ class SmartPrefetchManager {
     }
 
     console.error(
-      `❌ On-demand fetch failed after ${MAX_RETRY_ATTEMPTS} attempts: ${trackId}`
+      `On-demand fetch failed after ${MAX_RETRY_ATTEMPTS} attempts: ${trackId}`
     );
     return null;
   }
